@@ -1,0 +1,322 @@
+{
+  "title": "HVAC Simulators",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Monitored space",
+        "description": "Pick the sensors for a room or your whole home. Only indoor temperature is required; every extra sensor makes suggestions better.",
+        "data": {
+          "name": "Name",
+          "indoor_temperature": "Indoor temperature",
+          "indoor_humidity": "Indoor humidity",
+          "outdoor_temperature": "Outdoor temperature (sensor or weather entity)",
+          "outdoor_humidity": "Outdoor humidity (sensor or weather entity)",
+          "co2": "CO2 sensor",
+          "air_quality": "Air quality sensor (PM2.5 / VOC / AQI)",
+          "aq_lower_is_better": "Lower air quality reading is better",
+          "openings": "Door and window sensors",
+          "solar_threshold": "Solar gain threshold (outdoor °C)"
+        },
+        "data_description": {
+          "co2": "Only open doors/windows and extractor fans lower CO2 faster than normal. Also used to estimate how many people are home.",
+          "air_quality": "Particulates/VOC. If this improves while CO2 does not, an aircon or purifier filter is working.",
+          "solar_threshold": "When it is warming indoors and outdoor temperature is at or above this, it's the sun; below it, heat is leaking in from outside."
+        }
+      },
+      "menu": {
+        "title": "Appliances",
+        "description": "Add the heaters, aircons, extractor fans, dehumidifiers and purifiers in this space. You can add more later from Configure.\n\nAdded: {appliances}",
+        "menu_options": {
+          "add_appliance": "Add an appliance",
+          "finish": "Finish"
+        }
+      },
+      "add_appliance": {
+        "title": "Add appliance",
+        "data": {
+          "name": "Name",
+          "type": "Type"
+        }
+      },
+      "appliance_details": {
+        "title": "{name}",
+        "description": "{type}",
+        "data": {
+          "power_heat": "Heating power",
+          "power_cool": "Cooling power",
+          "power_dry": "Dehumidify (dry) power",
+          "power_ventilate": "Ventilate (fresh air) power",
+          "power_filter": "Filter / recirculate power",
+          "power_on": "Running power (per fan for fan groups)",
+          "standby_w": "Standby power",
+          "min_setpoint": "Minimum setpoint",
+          "max_setpoint": "Maximum setpoint",
+          "inverter": "Inverter / modulating (keeps running at reduced power at setpoint)",
+          "hold_factor": "Idle power factor (share of rated power while holding setpoint)",
+          "calculate_energy": "Calculate energy (kWh sensor)",
+          "count": "Number of fans in this group",
+          "members": "Fan names, comma separated (e.g. Bathroom, Kitchen, Laundry)",
+          "airflow_m3h": "Airflow per fan",
+          "power_entity": "Power sensor of its smart plug",
+          "on_threshold_w": "Counts as running above"
+        },
+        "data_description": {
+          "members": "Name them so each can be calibrated and identified; left blank they're Fan 1, Fan 2...",
+          "airflow_m3h": "Used until you calibrate. Typical: bathroom 90, kitchen hood 300-600.",
+          "power_entity": "Its learned heat and moisture effect is removed before HVAC detection, so e.g. a tumble dryer isn't mistaken for heating or a humidifier."
+        }
+      },
+      "hvac_functions": {
+        "title": "{name}: what can it do?",
+        "description": "Heat adds a heat mode. Air condition adds cool and dehumidify (dry). Ventilate adds fresh-air ventilation (lowers CO2) and indoor filter/recirculation (cleans particulates, not CO2).",
+        "data": {
+          "functions": "Functions"
+        }
+      }
+    },
+    "error": {
+      "setpoint_range": "Maximum must be above minimum",
+      "no_functions": "Pick at least one function"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HVAC Simulators",
+        "description": "Appliances: {appliances}",
+        "menu_options": {
+          "sensors": "Sensors",
+          "tuning": "Tuning, occupancy and notifications",
+          "add_appliance": "Add an appliance",
+          "edit_appliance": "Edit an appliance",
+          "remove_appliance": "Remove an appliance"
+        }
+      },
+      "sensors": {
+        "title": "Sensors",
+        "data": {
+          "indoor_temperature": "Indoor temperature",
+          "indoor_humidity": "Indoor humidity",
+          "outdoor_temperature": "Outdoor temperature (sensor or weather entity)",
+          "outdoor_humidity": "Outdoor humidity (sensor or weather entity)",
+          "co2": "CO2 sensor",
+          "air_quality": "Air quality sensor (PM2.5 / VOC / AQI)",
+          "aq_lower_is_better": "Lower air quality reading is better",
+          "openings": "Door and window sensors",
+          "solar_threshold": "Solar gain threshold (outdoor °C)"
+        },
+        "data_description": {
+          "co2": "Only open doors/windows and extractor fans lower CO2 faster than normal. Also used to estimate how many people are home.",
+          "air_quality": "Particulates/VOC. If this improves while CO2 does not, an aircon or purifier filter is working.",
+          "solar_threshold": "When it is warming indoors and outdoor temperature is at or above this, it's the sun; below it, heat is leaking in from outside."
+        }
+      },
+      "tuning": {
+        "title": "Tuning",
+        "data": {
+          "trend_window_minutes": "Trend window",
+          "solar_threshold": "Solar gain threshold (outdoor °C)",
+          "active_rate": "Rate beyond passive that means an appliance",
+          "stable_rate": "Rate below which temperature is stable",
+          "dehumidify_rate": "Humidity drop that means dehumidifying",
+          "aq_improve_percent": "Air quality improvement that counts",
+          "min_confidence": "Minimum confidence to switch an appliance on",
+          "hold_band": "Setpoint band (drift beyond this = unit off)",
+          "max_learned_weight": "Maximum weight of learned examples",
+          "learn_from_manual": "Learn from manually set modes",
+          "max_idle_minutes": "Max idle time for a fixed-speed unit before it counts as off",
+          "volume_m3": "Space volume",
+          "co2_outdoor": "Outdoor CO2",
+          "sleep_start_hour": "Sleep starts (hour)",
+          "sleep_end_hour": "Sleep ends (hour)",
+          "notify_rating": "Notify when effectiveness drops to",
+          "notify_service": "Notify service (optional, e.g. notify.mobile_app_phone)"
+        }
+      },
+      "add_appliance": {
+        "title": "Add appliance",
+        "data": {
+          "name": "Name",
+          "type": "Type"
+        }
+      },
+      "edit_appliance": {
+        "title": "Edit appliance",
+        "data": {
+          "id": "Appliance"
+        }
+      },
+      "rename_appliance": {
+        "title": "Edit appliance",
+        "data": {
+          "name": "Name"
+        }
+      },
+      "remove_appliance": {
+        "title": "Remove appliance",
+        "data": {
+          "id": "Appliance"
+        }
+      },
+      "appliance_details": {
+        "title": "{name}",
+        "description": "{type}",
+        "data": {
+          "power_heat": "Heating power",
+          "power_cool": "Cooling power",
+          "power_dry": "Dehumidify (dry) power",
+          "power_ventilate": "Ventilate (fresh air) power",
+          "power_filter": "Filter / recirculate power",
+          "power_on": "Running power (per fan for fan groups)",
+          "standby_w": "Standby power",
+          "min_setpoint": "Minimum setpoint",
+          "max_setpoint": "Maximum setpoint",
+          "inverter": "Inverter / modulating (keeps running at reduced power at setpoint)",
+          "hold_factor": "Idle power factor (share of rated power while holding setpoint)",
+          "calculate_energy": "Calculate energy (kWh sensor)",
+          "count": "Number of fans in this group",
+          "members": "Fan names, comma separated (e.g. Bathroom, Kitchen, Laundry)",
+          "airflow_m3h": "Airflow per fan",
+          "power_entity": "Power sensor of its smart plug",
+          "on_threshold_w": "Counts as running above"
+        },
+        "data_description": {
+          "members": "Name them so each can be calibrated and identified; left blank they're Fan 1, Fan 2...",
+          "airflow_m3h": "Used until you calibrate. Typical: bathroom 90, kitchen hood 300-600.",
+          "power_entity": "Its learned heat and moisture effect is removed before HVAC detection, so e.g. a tumble dryer isn't mistaken for heating or a humidifier."
+        }
+      },
+      "hvac_functions": {
+        "title": "{name}: what can it do?",
+        "description": "Heat adds a heat mode. Air condition adds cool and dehumidify (dry). Ventilate adds fresh-air ventilation (lowers CO2) and indoor filter/recirculation (cleans particulates, not CO2).",
+        "data": {
+          "functions": "Functions"
+        }
+      }
+    },
+    "error": {
+      "setpoint_range": "Maximum must be above minimum",
+      "no_functions": "Pick at least one function"
+    }
+  },
+  "services": {
+    "teach": {
+      "name": "Teach",
+      "description": "Tell the integration what is actually happening now.",
+      "fields": {
+        "device_id": {
+          "name": "Space",
+          "description": "The space device."
+        },
+        "label": {
+          "name": "Label",
+          "description": "Label key or display name, as shown in the Actual mode select."
+        }
+      }
+    },
+    "confirm": {
+      "name": "Confirm suggestion",
+      "description": "The current suggestion is correct.",
+      "fields": {
+        "device_id": {
+          "name": "Space",
+          "description": "The space device."
+        }
+      }
+    },
+    "reset_learning": {
+      "name": "Reset learning",
+      "description": "Forget everything learned for this space.",
+      "fields": {
+        "device_id": {
+          "name": "Space",
+          "description": "The space device."
+        }
+      }
+    },
+    "set_manual": {
+      "name": "Set manual mode",
+      "description": "Set what an appliance is doing and/or its setpoint.",
+      "fields": {
+        "device_id": {
+          "name": "Appliance",
+          "description": "The appliance device."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "auto to go back to inference."
+        },
+        "setpoint": {
+          "name": "Setpoint",
+          "description": "Setpoint on the unit."
+        },
+        "fans_on": {
+          "name": "Fans on",
+          "description": "Extractor fan groups: how many are running while in manual mode."
+        }
+      }
+    },
+    "calibrate": {
+      "name": "Calibrate appliance",
+      "description": "Record what an appliance is doing right now. Multiple calibrations are combined.",
+      "fields": {
+        "device_id": {
+          "name": "Appliance",
+          "description": "The appliance device."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Mode the unit is in."
+        },
+        "status": {
+          "name": "Status",
+          "description": "active, idle (at setpoint) or off."
+        },
+        "setpoint": {
+          "name": "Setpoint",
+          "description": "Setpoint on the unit."
+        },
+        "filter": {
+          "name": "Filter",
+          "description": "clean resets the effectiveness baseline."
+        },
+        "fans": {
+          "name": "Fans running",
+          "description": "Extractor fan groups: names of the fans running right now (calibrate one at a time to identify each)."
+        },
+        "fans_on": {
+          "name": "Number of fans running",
+          "description": "Extractor fan groups: how many are running right now (0 = none)."
+        }
+      }
+    },
+    "calibrate_occupancy": {
+      "name": "Calibrate occupancy",
+      "description": "Tell the CO2 model how many people are home and what they are doing.",
+      "fields": {
+        "device_id": {
+          "name": "Space",
+          "description": "The space device."
+        },
+        "people": {
+          "name": "People",
+          "description": "0 while nobody is home teaches the natural air change rate."
+        },
+        "activity": {
+          "name": "Activity",
+          "description": "Defaults to the current activity level."
+        }
+      }
+    },
+    "reset_energy": {
+      "name": "Reset energy",
+      "description": "Zero the energy counter of an appliance (or all in a space).",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Appliance or space device."
+        }
+      }
+    }
+  }
+}

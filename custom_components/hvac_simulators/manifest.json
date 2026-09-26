@@ -1,0 +1,13 @@
+{
+  "domain": "hvac_simulators",
+  "name": "HVAC Simulators",
+  "codeowners": ["@meyerjoshua123"],
+  "config_flow": true,
+  "dependencies": ["persistent_notification"],
+  "documentation": "https://github.com/meyerjoshua123/ha_hvac_simulators",
+  "integration_type": "hub",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/meyerjoshua123/ha_hvac_simulators/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

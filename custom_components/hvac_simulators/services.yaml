@@ -1,0 +1,119 @@
+teach:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: hvac_simulators
+    label:
+      required: true
+      example: "Cooling - Lounge aircon"
+      selector:
+        text:
+
+confirm:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: hvac_simulators
+
+reset_learning:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: hvac_simulators
+
+set_manual:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: hvac_simulators
+    mode:
+      example: cool
+      selector:
+        select:
+          options: ["auto", "off", "heat", "cool", "dry", "ventilate", "filter", "on"]
+    setpoint:
+      selector:
+        number:
+          min: 0
+          max: 40
+          step: 0.5
+          unit_of_measurement: "°C"
+    fans_on:
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 1
+
+calibrate:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: hvac_simulators
+    mode:
+      selector:
+        select:
+          options: ["off", "heat", "cool", "dry", "ventilate", "filter", "on"]
+    status:
+      selector:
+        select:
+          options: ["active", "idle", "off"]
+    setpoint:
+      selector:
+        number:
+          min: 0
+          max: 40
+          step: 0.5
+          unit_of_measurement: "°C"
+    filter:
+      selector:
+        select:
+          options: ["clean", "ok", "dirty"]
+    fans:
+      example: "Bathroom"
+      selector:
+        text:
+          multiple: true
+    fans_on:
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 1
+
+calibrate_occupancy:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: hvac_simulators
+    people:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+    activity:
+      selector:
+        select:
+          options: ["sleeping", "resting", "active", "exercising"]
+
+reset_energy:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: hvac_simulators
