@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 
-if sys.version_info < (3, 13):
+if sys.version_info < (3, 13):  # noqa: UP036
     pytest.skip("Home Assistant tests need Python 3.13+", allow_module_level=True)
 
 from freezegun.api import FrozenDateTimeFactory
