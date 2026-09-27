@@ -77,6 +77,7 @@ async def _create_entry(hass: HomeAssistant):
         "standby_w": 2,
         "inverter": False,
         "hold_factor": 0.4,
+        "idle_fan_w": 40,
         "calculate_energy": True,
     }
     bad = await flow.async_configure(result["flow_id"], {**details, "min_setpoint": 30, "max_setpoint": 18})

@@ -135,3 +135,17 @@ def test_absolute_humidity():
     # 20 °C at 50 % RH is about 8.6 g/m³.
     assert abs(absolute_humidity(20.0, 50.0) - 8.6) < 0.1
     assert absolute_humidity(None, 50.0) is None
+
+
+def test_cycle_detector_ignores_random_humidity_wander():
+    import random
+
+    from hvac_simulators.cycling import detect_cycling
+
+    rng = random.Random(7)
+    for _ in range(40):
+        value, samples = 60.0, []
+        for minute in range(240):
+            value += rng.gauss(0, 0.15)
+            samples.append(Sample(ts=minute * 60, t_in=17.0, rh_in=round(value, 1)))
+        assert detect_cycling(samples, 239 * 60)["strength"] < 0.6
