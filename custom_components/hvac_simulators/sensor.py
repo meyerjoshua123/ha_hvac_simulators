@@ -120,6 +120,7 @@ class SuggestedModeSensor(HvacSimEntity, SensorEntity):
             "learned_weight": round(p.learned_weight * 100, 1),
             "openings_open": m.openings_open(),
             "features": m.features.as_dict() if m.features else None,
+            "compressor_cycling": m.cycle,
         }
 
 
@@ -360,6 +361,8 @@ class ApplianceStateSensor(ApplianceEntity, SensorEntity):
         self._attr_native_value = sim.status
         self._attr_extra_state_attributes = {
             "mode": sim.mode,
+            "idle_reason": sim.idle_reason,
+            "thermostat_offset": sim.thermostat_offset,
             "cycles": sim.cycles,
             "duty_cycle": None if duty is None else round(duty * 100, 1),
         }

@@ -86,6 +86,7 @@ CONF_MIN_SETPOINT = "min_setpoint"
 CONF_MAX_SETPOINT = "max_setpoint"
 CONF_INVERTER = "inverter"
 CONF_HOLD_FACTOR = "hold_factor"
+CONF_IDLE_FAN_W = "idle_fan_w"
 CONF_CALCULATE_ENERGY = "calculate_energy"
 
 # Evaluation cadence

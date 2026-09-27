@@ -16,9 +16,9 @@ from __future__ import annotations
 import statistics
 from typing import Any
 
-from .appliances import MODE_COOL, MODE_HEAT, MODE_OFF, Appliance, split_label
+from .appliances import MODE_COOL, MODE_DRY, MODE_HEAT, MODE_OFF, Appliance, split_label
 from .effectiveness import EffectivenessTracker, rating_rank
-from .engine import Features
+from .engine import CYCLE_DETECTED, Features
 
 STATUS_OFF = "off"
 STATUS_ACTIVE = "active"
@@ -29,6 +29,15 @@ MANUAL_AUTO = "auto"
 
 # Half-width of the band a manually-set unit cycles within around its setpoint.
 _MANUAL_BAND = 0.3
+# Past the setpoint by more than this, the unit has nothing to do: compressor
+# or element off, fan only. Learned from a night where a cooling aircon set to
+# 18 °C sat idle in a 17 °C room.
+_SATISFIED_MARGIN = 0.5
+
+IDLE_HOLDING = "holding setpoint"
+IDLE_SATISFIED = "setpoint satisfied, compressor off (fan only)"
+IDLE_CYCLING = "between compressor cycles (fan only)"
+_OFFSET_EMA = 0.05
 # Ignore power gaps longer than this when integrating energy (e.g. HA was down).
 _MAX_INTEGRATION_GAP_S = 900.0
 _TURN_POINTS_KEPT = 12
@@ -48,6 +57,10 @@ class ApplianceSimulator:
         self.energy_kwh = 0.0
         self.power_w = appliance.standby_w
         self.cycles = 0
+        self.idle_reason: str | None = None
+        # Room sensor minus the unit's own thermostat, learned while it cycles
+        # (e.g. -1.0 when the room reads 17 °C with the unit holding 18 °C).
+        self.thermostat_offset: float | None = None
         # Fan groups: how many fans are running (estimated, or set manually).
         self.units_on = 0
         self.units_on_members: list[str] = []
@@ -72,6 +85,7 @@ class ApplianceSimulator:
             "manual_mode": self.manual_mode,
             "manual_setpoint": self.manual_setpoint,
             "manual_units": self.manual_units,
+            "thermostat_offset": self.thermostat_offset,
             "energy_kwh": self.energy_kwh,
             "cycles": self.cycles,
             "turn_points": self.turn_points,
@@ -87,6 +101,7 @@ class ApplianceSimulator:
         self.manual_mode = mode if mode in valid else MANUAL_AUTO
         self.manual_setpoint = data.get("manual_setpoint")
         self.manual_units = data.get("manual_units")
+        self.thermostat_offset = data.get("thermostat_offset")
         self.energy_kwh = float(data.get("energy_kwh", 0.0))
         self.cycles = int(data.get("cycles", 0))
         self.turn_points = {
@@ -259,12 +274,17 @@ class ApplianceSimulator:
         """Advance the state machine, integrate energy and sample effectiveness."""
         self._integrate(now)
         prev_status = self.status
+        cycling = self._cycling(features)
         if self.manual_mode != MANUAL_AUTO:
             self._update_manual(features, hold_band)
         else:
             self._update_auto(
                 now, features, label, confidence, min_confidence, hold_band, other_active, max_idle_s
             )
+        if cycling and self.mode in (MODE_COOL, MODE_DRY) and self.status != STATUS_OFF:
+            # Evidence beats assumption: follow the compressor seen in humidity.
+            self.status = STATUS_ACTIVE if features.compressor_on else STATUS_IDLE  # type: ignore[union-attr]
+            self._learn_offset(features)  # type: ignore[arg-type]
 
         if self.status == STATUS_ACTIVE and prev_status != STATUS_ACTIVE:
             self.active_since = now
@@ -281,12 +301,45 @@ class ApplianceSimulator:
         while self._history and self._history[0][0] < cutoff:
             self._history.pop(0)
         self._update_units(fan_estimate)
+        if self.status == STATUS_IDLE:
+            self.idle_reason = IDLE_CYCLING if cycling else self._idle_reason(features)
+        else:
+            self.idle_reason = None
         if self.status == STATUS_OFF:
             self.power_w = self.appliance.standby_w
         else:
             self.power_w = self.appliance.power_for(
-                self.mode, idle=self.status == STATUS_IDLE, units_on=self.units_on
+                self.mode,
+                idle=self.status == STATUS_IDLE,
+                units_on=self.units_on,
+                satisfied=self.idle_reason in (IDLE_SATISFIED, IDLE_CYCLING),
             )
+
+    @staticmethod
+    def _cycling(f: Features | None) -> bool:
+        return f is not None and f.cycle_strength >= CYCLE_DETECTED and f.compressor_on is not None
+
+    def _learn_offset(self, f: Features) -> None:
+        sp = self.manual_setpoint if self.manual_setpoint is not None else self.calibrated_setpoint(self.mode)
+        if sp is None:
+            return
+        diff = f.t_in - sp
+        if self.thermostat_offset is None:
+            self.thermostat_offset = round(diff, 2)
+        else:
+            self.thermostat_offset = round(
+                self.thermostat_offset + _OFFSET_EMA * (diff - self.thermostat_offset), 3
+            )
+
+    def _idle_reason(self, f: Features | None) -> str:
+        """Why an idle unit is idle: holding its setpoint, or already past it."""
+        sp = self.setpoint
+        if f is None or sp is None or self.mode not in (MODE_HEAT, MODE_COOL):
+            return IDLE_HOLDING
+        sp += self.thermostat_offset or 0.0  # judge in room-sensor terms
+        # Positive = room is on the "done" side of the setpoint.
+        past = (f.t_in - sp) if self.mode == MODE_HEAT else (sp - f.t_in)
+        return IDLE_SATISFIED if past > _SATISFIED_MARGIN else IDLE_HOLDING
 
     def _update_units(self, fan_estimate: dict[str, Any] | None) -> None:
         """How many units are running: 1 for single appliances, estimated for fan groups."""
@@ -312,8 +365,13 @@ class ApplianceSimulator:
             return
         self.mode = self.manual_mode
         sp = self.setpoint
-        if f is None or sp is None or self.mode not in (MODE_HEAT, MODE_COOL):
+        if self.mode not in (MODE_HEAT, MODE_COOL) or sp is None:
             self.status = STATUS_ACTIVE
+            return
+        if f is None:
+            # No readings yet: on, but don't claim it's driving the room.
+            if self.status == STATUS_OFF:
+                self.status = STATUS_IDLE
             return
         band = min(_MANUAL_BAND, hold_band / 2)
         sign = 1 if self.mode == MODE_HEAT else -1

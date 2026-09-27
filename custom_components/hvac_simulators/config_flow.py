@@ -51,6 +51,7 @@ from .const import (
     CONF_FUNCTIONS,
     CONF_HOLD_BAND,
     CONF_HOLD_FACTOR,
+    CONF_IDLE_FAN_W,
     CONF_INDOOR_HUMIDITY,
     CONF_INDOOR_TEMP,
     CONF_INVERTER,
@@ -307,6 +308,10 @@ def _appliance_details_schema(atype: str, current: dict[str, Any]) -> vol.Schema
         )
         fields[vol.Required(CONF_HOLD_FACTOR, default=current.get(CONF_HOLD_FACTOR, 0.4))] = _num(
             0.05, 1, 0.05
+        )
+        fan_default = 30 if atype == TYPE_AIRCON else 0
+        fields[vol.Required(CONF_IDLE_FAN_W, default=current.get(CONF_IDLE_FAN_W, fan_default))] = _num(
+            0, 500, 1, "W"
         )
     fields[vol.Required(CONF_CALCULATE_ENERGY, default=current.get(CONF_CALCULATE_ENERGY, True))] = (
         selector.BooleanSelector()

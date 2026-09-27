@@ -24,6 +24,7 @@ from .const import (
     ATTR_SETPOINT,
     ATTR_STATUS,
     DOMAIN,
+    MANUFACTURER,
     SERVICE_CALIBRATE,
     SERVICE_CALIBRATE_OCCUPANCY,
     SERVICE_CONFIRM,
@@ -203,6 +204,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HvacSimConfigEntry) -> b
     """Set up a monitored space."""
     manager = HvacSimulatorManager(hass, entry)
     entry.runtime_data = manager
+    # Create the space device first: appliance devices link to it via via_device.
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=entry.title,
+        manufacturer=MANUFACTURER,
+        model="Space",
+    )
     _remove_stale_appliance_devices(hass, entry, manager)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await manager.async_start()

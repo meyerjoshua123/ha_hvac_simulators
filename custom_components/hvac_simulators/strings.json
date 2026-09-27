@@ -52,18 +52,20 @@
           "min_setpoint": "Minimum setpoint",
           "max_setpoint": "Maximum setpoint",
           "inverter": "Inverter / modulating (keeps running at reduced power at setpoint)",
-          "hold_factor": "Idle power factor (share of rated power while holding setpoint)",
+          "hold_factor": "Idle power factor while holding the setpoint (inverters)",
           "calculate_energy": "Calculate energy (kWh sensor)",
           "count": "Number of fans in this group",
           "members": "Fan names, comma separated (e.g. Bathroom, Kitchen, Laundry)",
           "airflow_m3h": "Airflow per fan",
           "power_entity": "Power sensor of its smart plug",
-          "on_threshold_w": "Counts as running above"
+          "on_threshold_w": "Counts as running above",
+          "idle_fan_w": "Fan-only power (compressor/element off)"
         },
         "data_description": {
           "members": "Name them so each can be calibrated and identified; left blank they're Fan 1, Fan 2...",
           "airflow_m3h": "Used until you calibrate. Typical: bathroom 90, kitchen hood 300-600.",
-          "power_entity": "Its learned heat and moisture effect is removed before HVAC detection, so e.g. a tumble dryer isn't mistaken for heating or a humidifier."
+          "power_entity": "Its learned heat and moisture effect is removed before HVAC detection, so e.g. a tumble dryer isn't mistaken for heating or a humidifier.",
+          "idle_fan_w": "Used when the unit is on but the room is already past its setpoint, e.g. cooling set to 18 °C in a 17 °C room."
         }
       },
       "hvac_functions": {
@@ -172,18 +174,20 @@
           "min_setpoint": "Minimum setpoint",
           "max_setpoint": "Maximum setpoint",
           "inverter": "Inverter / modulating (keeps running at reduced power at setpoint)",
-          "hold_factor": "Idle power factor (share of rated power while holding setpoint)",
+          "hold_factor": "Idle power factor while holding the setpoint (inverters)",
           "calculate_energy": "Calculate energy (kWh sensor)",
           "count": "Number of fans in this group",
           "members": "Fan names, comma separated (e.g. Bathroom, Kitchen, Laundry)",
           "airflow_m3h": "Airflow per fan",
           "power_entity": "Power sensor of its smart plug",
-          "on_threshold_w": "Counts as running above"
+          "on_threshold_w": "Counts as running above",
+          "idle_fan_w": "Fan-only power (compressor/element off)"
         },
         "data_description": {
           "members": "Name them so each can be calibrated and identified; left blank they're Fan 1, Fan 2...",
           "airflow_m3h": "Used until you calibrate. Typical: bathroom 90, kitchen hood 300-600.",
-          "power_entity": "Its learned heat and moisture effect is removed before HVAC detection, so e.g. a tumble dryer isn't mistaken for heating or a humidifier."
+          "power_entity": "Its learned heat and moisture effect is removed before HVAC detection, so e.g. a tumble dryer isn't mistaken for heating or a humidifier.",
+          "idle_fan_w": "Used when the unit is on but the room is already past its setpoint, e.g. cooling set to 18 °C in a 17 °C room."
         }
       },
       "hvac_functions": {

@@ -87,6 +87,7 @@ from .const import (
     STORAGE_VERSION,
     UPDATE_INTERVAL_S,
 )
+from .cycling import detect_cycling
 from .effectiveness import RATING_NAMES, rating_rank
 from .engine import (
     ACTIVE_CAUSES,
@@ -117,6 +118,7 @@ _LOGGER = logging.getLogger(__name__)
 _SAVE_DELAY_S = 30
 _MIN_EVAL_GAP_S = 10
 _OCCUPANCY_EMA = 0.3
+CYCLE_HISTORY_S = 3 * 3600
 ACTIVITY_AUTO = "auto"
 
 
@@ -170,7 +172,9 @@ class HvacSimulatorManager:
         self._people_smoothed: float | None = None
         self.last_ratings: dict[str, str | None] = {}
         self.learner = Learner(float(self._opt(CONF_MAX_LEARNED_WEIGHT, DEFAULT_MAX_LEARNED_WEIGHT)))
-        self.buffer = SampleBuffer(self.window_s * 2)
+        # Keep enough history for the compressor-cycling detector (3 h).
+        self.buffer = SampleBuffer(max(self.window_s * 2, CYCLE_HISTORY_S))
+        self.cycle: dict[str, Any] | None = None
         self.features: Features | None = None
         self.prediction: Prediction | None = None
         self.last_taught: str | None = None
@@ -358,6 +362,7 @@ class HvacSimulatorManager:
             self.buffer.add(self._take_sample(now))
         tuning = self.tuning
         mean_power = self.buffer.mean_gains(self.window_s, now)
+        self.cycle = detect_cycling(self.buffer.samples, now, CYCLE_HISTORY_S)
         self.features = compute_features(
             self.buffer,
             now,
@@ -366,6 +371,7 @@ class HvacSimulatorManager:
             self._sun_up(),
             dt_util.now().hour,
             gains=self.gains.predict(mean_power),
+            cycle=self.cycle,
         )
         if self.features is not None:
             rule = score_causes(self.features, tuning)

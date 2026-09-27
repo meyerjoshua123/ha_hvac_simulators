@@ -31,6 +31,9 @@ CAUSE_WINDOW_AIRING = "window_airing"
 CAUSE_HUMIDIFY = "humidify"
 CAUSE_INTERNAL_GAINS = "internal_gains"
 
+# Cycling strength (cycling.py) at which the pattern counts as detected.
+CYCLE_DETECTED = 0.6
+
 # Causes that need an appliance to be running.
 ACTIVE_CAUSES = (
     CAUSE_HEATING,
@@ -128,6 +131,10 @@ class Features:
     # r_t / r_h above are *compensated*: the learned effect of heat sources is removed.
     gain_t: float = 0.0  # °C/h attributed to heat sources
     gain_h: float = 0.0  # %RH/h attributed to heat sources
+    # Compressor cycling seen in humidity (see cycling.py); 0 when none.
+    cycle_strength: float = 0.0
+    cycle_period_min: float | None = None
+    compressor_on: bool | None = None
 
     @property
     def delta_out(self) -> float | None:
@@ -155,6 +162,9 @@ class Features:
             "ach_obs": None if self.ach_obs is None else round(self.ach_obs, 3),
             "gain_t": round(self.gain_t, 3),
             "gain_h": round(self.gain_h, 3),
+            "cycle_strength": self.cycle_strength,
+            "cycle_period_min": self.cycle_period_min,
+            "compressor_on": self.compressor_on,
         }
 
     @classmethod
@@ -300,6 +310,7 @@ def compute_features(
     sun_up: bool | None,
     hour: int,
     gains: tuple[float, float] = (0.0, 0.0),
+    cycle: dict | None = None,
 ) -> Features | None:
     """Turn the sample buffer into a feature vector. None when there is not enough data.
 
@@ -350,6 +361,9 @@ def compute_features(
         ach_obs=ach_obs,
         gain_t=gain_t,
         gain_h=gain_h if r_h is not None else 0.0,
+        cycle_strength=float((cycle or {}).get("strength") or 0.0),
+        cycle_period_min=(cycle or {}).get("period_min"),
+        compressor_on=(cycle or {}).get("compressor_on"),
     )
 
 
@@ -546,6 +560,23 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
             reasons[CAUSE_HEAT_LOSS].append(
                 f"Outside is {-d_out:.1f} °C colder; cooling matches passive heat loss"
             )
+
+    # Regular compressor cycling in humidity: a cooling or dry-mode unit holding
+    # the room, even when the building's thermal mass keeps temperature flat.
+    if f.cycle_strength >= CYCLE_DETECTED:
+        cyc = f.cycle_strength
+        # The short swings inside each cycle are the compressor itself, not
+        # separate heating/humidifying events or a stable room.
+        for cause in (CAUSE_HEATING, CAUSE_HUMIDIFY, CAUSE_IDLE):
+            scores[cause] *= 1.0 - cyc
+        scores[CAUSE_COOLING] = max(scores[CAUSE_COOLING], cyc)
+        scores[CAUSE_DEHUMIDIFY] = max(scores[CAUSE_DEHUMIDIFY], 0.4 * cyc)
+        note = (
+            f"Humidity cycling every ~{f.cycle_period_min} min (compressor on/off) while "
+            "temperature is held; the building's stored heat can balance what the unit removes"
+        )
+        reasons[CAUSE_COOLING].append(note)
+        reasons[CAUSE_DEHUMIDIFY].append(note)
 
     return RuleResult(probs=normalize(scores), reasons=reasons)
 

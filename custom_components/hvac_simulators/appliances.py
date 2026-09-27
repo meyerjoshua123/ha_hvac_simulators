@@ -154,6 +154,8 @@ class Appliance:
     max_setpoint: float | None = None
     inverter: bool = True
     hold_factor: float = 0.4
+    # Power while the compressor/element is off but the unit is on (fan only).
+    idle_fan_w: float = 30.0
     calculate_energy: bool = True
     # Extractor fan groups
     count: int = 1
@@ -195,6 +197,7 @@ class Appliance:
             max_setpoint=_opt_float(data.get("max_setpoint")),
             inverter=bool(data.get("inverter", True)),
             hold_factor=float(data.get("hold_factor") or 0.4),
+            idle_fan_w=_idle_fan_default(atype, data),
             calculate_energy=bool(data.get("calculate_energy", True)) and atype != TYPE_HEAT_SOURCE,
             count=count if atype == TYPE_EXTRACTOR_FAN else 1,
             members=members if atype == TYPE_EXTRACTOR_FAN else [],
@@ -242,22 +245,37 @@ class Appliance:
             value = min(self.max_setpoint, value)
         return value
 
-    def power_for(self, mode: str, idle: bool = False, units_on: int = 1) -> float:
+    def power_for(self, mode: str, idle: bool = False, units_on: int = 1, satisfied: bool = False) -> float:
         """Estimated power draw (W) in ``mode``.
 
-        ``idle`` means the unit is on and at its setpoint between cycles: an
-        inverter keeps running at reduced output, while a fixed-speed unit has
-        its compressor/element off and only its fan (if any) runs.
+        ``idle`` means the unit is on but not driving the temperature:
+
+        * ``satisfied`` (the room is already past the setpoint, e.g. 17 °C with
+          cooling set to 18 °C): the compressor/element is off and only the
+          fan runs, inverter or not.
+        * otherwise it is holding the setpoint between cycles: an inverter keeps
+          running at reduced output, a fixed-speed unit rests on its fan.
+
         ``units_on`` is how many fans of a group are running.
         """
         if mode == MODE_OFF or mode not in self.power:
             return self.standby_w
         rated = self.power[mode] * max(units_on, 1)
         if idle:
-            if self.inverter:
+            if self.inverter and not satisfied:
                 return max(self.standby_w, rated * self.hold_factor)
-            return max(self.standby_w, self.power.get(MODE_FILTER, 0.0))
+            return max(self.standby_w, self.idle_fan_w)
         return rated
+
+
+def _idle_fan_default(atype: str, data: dict[str, Any]) -> float:
+    """Fan-only power: as configured, else the unit's filter/fan mode power, else 30 W for HVAC units."""
+    if data.get("idle_fan_w") not in (None, ""):
+        return float(data["idle_fan_w"])
+    for key in ("power_filter", "power_fan"):  # power_fan: configs from before HVAC functions
+        if data.get(key) not in (None, ""):
+            return float(data[key])
+    return 30.0 if atype == TYPE_AIRCON else 0.0
 
 
 def _opt_float(value: Any) -> float | None:
