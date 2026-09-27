@@ -1,4 +1,4 @@
-"""Runtime manager: reads sensors, runs the engine, drives appliances, persists learning."""
+"""Runtime manager: reads sensors, runs each room, drives appliances, persists learning."""
 
 from __future__ import annotations
 
@@ -27,13 +27,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from .appliances import (
-    Appliance,
-    available_labels,
-    label_name,
-    make_label,
-    split_label,
-)
+from .appliances import Appliance
 from .const import (
     CONF_ACTIVE_RATE,
     CONF_AIR_QUALITY,
@@ -47,6 +41,11 @@ from .const import (
     CONF_INDOOR_HUMIDITY,
     CONF_INDOOR_TEMP,
     CONF_LEARN_FROM_MANUAL,
+    CONF_MAIN_AIR_GAP_NOTES,
+    CONF_MAIN_AIR_GAPS,
+    CONF_MAIN_AREA,
+    CONF_MAIN_FLOWS_INTO,
+    CONF_MAIN_TYPE,
     CONF_MAX_IDLE_MINUTES,
     CONF_MAX_LEARNED_WEIGHT,
     CONF_MIN_CONFIDENCE,
@@ -55,11 +54,16 @@ from .const import (
     CONF_OPENINGS,
     CONF_OUTDOOR_HUMIDITY,
     CONF_OUTDOOR_TEMP,
+    CONF_ROOMS,
     CONF_SLEEP_END,
     CONF_SLEEP_START,
+    CONF_SOLAR_MARGIN,
     CONF_SOLAR_THRESHOLD,
     CONF_STABLE_RATE,
     CONF_SUN_ENTITY,
+    CONF_UPDATE_INTERVAL,
+    CONF_UPDATE_MODE,
+    CONF_USE_VIRTUAL_OPENINGS,
     CONF_VOLUME,
     CONF_WINDOW_MINUTES,
     DEFAULT_ACTIVE_RATE,
@@ -74,42 +78,40 @@ from .const import (
     DEFAULT_NOTIFY_RATING,
     DEFAULT_SLEEP_END,
     DEFAULT_SLEEP_START,
+    DEFAULT_SOLAR_MARGIN,
     DEFAULT_SOLAR_THRESHOLD,
     DEFAULT_STABLE_RATE,
+    DEFAULT_UPDATE_INTERVAL,
     DEFAULT_VOLUME,
     DEFAULT_WINDOW_MINUTES,
     DOMAIN,
     EFFECTIVENESS_WARMUP_FRACTION,
+    EVENT_APPLIANCE,
     EVENT_EFFECTIVENESS,
-    FEEDBACK_CONFIDENCE,
     MANUAL_TEACH_INTERVAL_S,
+    MIN_EVAL_GAP_ON_CHANGE_S,
     SIGNAL_UPDATE,
     STORAGE_VERSION,
-    UPDATE_INTERVAL_S,
+    UPDATE_MODE_ON_CHANGE,
 )
-from .cycling import detect_cycling
 from .effectiveness import RATING_NAMES, rating_rank
-from .engine import (
-    ACTIVE_CAUSES,
-    CAUSE_VENTILATION,
-    Features,
-    Sample,
-    SampleBuffer,
-    Tuning,
-    absolute_humidity,
-    compute_features,
-    score_causes,
-)
-from .fans import FanGroupEstimator
-from .gains import GainsModel
-from .learning import Learner, Prediction
+from .engine import CAUSE_VENTILATION, Sample, Tuning
 from .occupancy import (
     ACTIVITY_RESTING,
     ACTIVITY_SLEEPING,
     VENT_CLOSED,
     VENT_FAN,
     VENT_OPEN,
-    OccupancyModel,
+)
+from .plugs import PlugTracker
+from .room import (
+    MAIN_ROOM,
+    SHOWER_AFTERGLOW_S,
+    Room,
+    RoomConfig,
+    RoomContext,
+    observing_room,
+    zones,
 )
 from .simulator import MANUAL_AUTO, STATUS_ACTIVE, STATUS_OFF, ApplianceSimulator
 
@@ -117,13 +119,11 @@ _LOGGER = logging.getLogger(__name__)
 
 _SAVE_DELAY_S = 30
 _MIN_EVAL_GAP_S = 10
-_OCCUPANCY_EMA = 0.3
-CYCLE_HISTORY_S = 3 * 3600
 ACTIVITY_AUTO = "auto"
 
 
 class HvacSimulatorManager:
-    """One monitored space (a room or the whole home) and its appliances."""
+    """One monitored space (usually a home): its rooms and appliances."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -138,19 +138,23 @@ class HvacSimulatorManager:
         self.sims: dict[str, ApplianceSimulator] = {
             a.id: ApplianceSimulator(a) for a in self.appliances if not a.is_heat_source
         }
-        self.gains = GainsModel()
-        self.gains.load(None, [a.id for a in self.heat_sources])
+        self.plugs: dict[str, PlugTracker] = {
+            a.id: PlugTracker(a.kind, a.on_threshold_w, a.active_above_w) for a in self.heat_sources
+        }
         self.source_power: dict[str, float] = {}
         self.window_s = float(self._opt(CONF_WINDOW_MINUTES, DEFAULT_WINDOW_MINUTES)) * 60
         self.min_confidence = float(self._opt(CONF_MIN_CONFIDENCE, DEFAULT_MIN_CONFIDENCE))
         self.hold_band = float(self._opt(CONF_HOLD_BAND, DEFAULT_HOLD_BAND))
         self.learn_from_manual = bool(self._opt(CONF_LEARN_FROM_MANUAL, DEFAULT_LEARN_FROM_MANUAL))
+        self.update_on_change = self.config.get(CONF_UPDATE_MODE) == UPDATE_MODE_ON_CHANGE
+        self.update_interval_s = max(5.0, float(self._opt(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)))
         self.base_tuning = Tuning(
             active_rate=float(self._opt(CONF_ACTIVE_RATE, DEFAULT_ACTIVE_RATE)),
             stable_rate=float(self._opt(CONF_STABLE_RATE, DEFAULT_STABLE_RATE)),
             dehumid_rh_rate=float(self._opt(CONF_DEHUMID_RATE, DEFAULT_DEHUMID_RATE)),
             aq_improve_rel=-abs(float(self._opt(CONF_AQ_IMPROVE_PCT, DEFAULT_AQ_IMPROVE_PCT))) / 100.0,
             solar_threshold=float(self._opt(CONF_SOLAR_THRESHOLD, DEFAULT_SOLAR_THRESHOLD)),
+            solar_margin=float(self._opt(CONF_SOLAR_MARGIN, DEFAULT_SOLAR_MARGIN)),
             aq_lower_is_better=bool(self._opt(CONF_AQ_LOWER_IS_BETTER, True)),
             co2_outdoor=float(self._opt(CONF_CO2_OUTDOOR, DEFAULT_CO2_OUTDOOR)),
         )
@@ -159,25 +163,27 @@ class HvacSimulatorManager:
         self.sleep_end = int(self._opt(CONF_SLEEP_END, DEFAULT_SLEEP_END))
         self.notify_service: str | None = self.config.get(CONF_NOTIFY_SERVICE) or None
         self.notify_rating = str(self._opt(CONF_NOTIFY_RATING, DEFAULT_NOTIFY_RATING))
-        volume = float(self._opt(CONF_VOLUME, DEFAULT_VOLUME))
-        self.occupancy = OccupancyModel(volume, self.base_tuning.co2_outdoor)
-        self.fan_groups: dict[str, FanGroupEstimator] = {
-            a.id: FanGroupEstimator(a.members, a.airflow_m3h, volume)
-            for a in self.appliances
-            if a.is_fan_group
-        }
-        self.fan_estimates: dict[str, dict[str, Any]] = {}
         self.activity_override = ACTIVITY_AUTO
-        self.occupancy_estimate: dict[str, Any] | None = None
-        self._people_smoothed: float | None = None
         self.last_ratings: dict[str, str | None] = {}
-        self.learner = Learner(float(self._opt(CONF_MAX_LEARNED_WEIGHT, DEFAULT_MAX_LEARNED_WEIGHT)))
-        # Keep enough history for the compressor-cycling detector (3 h).
-        self.buffer = SampleBuffer(max(self.window_s * 2, CYCLE_HISTORY_S))
-        self.cycle: dict[str, Any] | None = None
-        self.features: Features | None = None
-        self.prediction: Prediction | None = None
-        self.last_taught: str | None = None
+
+        self.room_configs: list[RoomConfig] = [self._main_room_config()] + [
+            RoomConfig.from_dict(r) for r in self.config.get(CONF_ROOMS, []) if r.get("id") != MAIN_ROOM
+        ]
+        self.appliance_room: dict[str, str] = {
+            a.id: observing_room(a, self.room_configs) for a in self.appliances
+        }
+        max_weight = float(self._opt(CONF_MAX_LEARNED_WEIGHT, DEFAULT_MAX_LEARNED_WEIGHT))
+        self.rooms: dict[str, Room] = {}
+        for rc in self.room_configs:
+            self.rooms[rc.id] = Room(
+                rc,
+                self.base_tuning,
+                self.window_s,
+                max_weight,
+                [s.appliance for s in self.sims.values() if self.appliance_room[s.appliance.id] == rc.id],
+                [h for h in self.heat_sources if self.appliance_room[h.id] == rc.id],
+            )
+        self.zones = zones(self.room_configs)
         self._store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
         self._unsubs: list[Callable[[], None]] = []
         self._last_eval = 0.0
@@ -187,31 +193,73 @@ class HvacSimulatorManager:
         value = self.config.get(key)
         return default if value in (None, "") else value
 
-    # --- lifecycle -------------------------------------------------------
+    def _main_room_config(self) -> RoomConfig:
+        c = self.config
+        return RoomConfig(
+            id=MAIN_ROOM,
+            name=self.entry.title,
+            area_id=c.get(CONF_MAIN_AREA) or None,
+            type=c.get(CONF_MAIN_TYPE) or "living",
+            temperature=c.get(CONF_INDOOR_TEMP) or None,
+            humidity=c.get(CONF_INDOOR_HUMIDITY) or None,
+            co2=c.get(CONF_CO2) or None,
+            air_quality=c.get(CONF_AIR_QUALITY) or None,
+            openings=list(c.get(CONF_OPENINGS) or []),
+            volume_m3=float(self._opt(CONF_VOLUME, DEFAULT_VOLUME)),
+            air_gaps=c.get(CONF_MAIN_AIR_GAPS) or "none",
+            air_gap_notes=c.get(CONF_MAIN_AIR_GAP_NOTES) or "",
+            flows_into=list(c.get(CONF_MAIN_FLOWS_INTO) or []),
+            use_virtual_openings=bool(c.get(CONF_USE_VIRTUAL_OPENINGS, True)),
+        )
+
+    # --- rooms -------------------------------------------------------------
+
+    @property
+    def main(self) -> Room:
+        return self.rooms[MAIN_ROOM]
+
+    def room_of(self, appliance_id: str) -> Room:
+        """The room whose sensors observe this appliance."""
+        return self.rooms[self.appliance_room.get(appliance_id, MAIN_ROOM)]
+
+    def zone_of(self, room_id: str) -> set[str]:
+        for group in self.zones:
+            if room_id in group:
+                return group
+        return {room_id}
+
+    @property
+    def simulated(self) -> list[Appliance]:
+        return [sim.appliance for sim in self.sims.values()]
+
+    # --- lifecycle -----------------------------------------------------------
 
     async def async_start(self) -> None:
         data = await self._store.async_load() or {}
-        self.learner.load(data.get("learner"))
-        known = {a.id for a in self.appliances}
-        for appliance_id in {split_label(s.label)[1] for s in self.learner.samples} - {None} - known:
-            self.learner.forget_appliance(appliance_id)  # type: ignore[arg-type]
+        rooms_data = dict(data.get("rooms") or {})
+        if "learner" in data and MAIN_ROOM not in rooms_data:
+            # Stored before rooms existed: everything belonged to the one space.
+            rooms_data[MAIN_ROOM] = {
+                k: data.get(k) for k in ("learner", "gains", "occupancy", "fan_groups", "last_taught")
+            }
+        for room_id, room in self.rooms.items():
+            room.load(rooms_data.get(room_id))
         for appliance_id, sim_data in data.get("appliances", {}).items():
             if appliance_id in self.sims:
                 self.sims[appliance_id].load(sim_data)
-        self.last_taught = data.get("last_taught")
-        self.occupancy.load(data.get("occupancy"))
+        for plug_id, plug_data in (data.get("plugs") or {}).items():
+            if plug_id in self.plugs:
+                self.plugs[plug_id].load(plug_data)
         self.activity_override = data.get("activity_override", ACTIVITY_AUTO)
         self.last_ratings = dict(data.get("last_ratings", {}))
-        self.gains.load(data.get("gains"), [a.id for a in self.heat_sources])
-        for group_id, group_data in (data.get("fan_groups") or {}).items():
-            if group_id in self.fan_groups:
-                self.fan_groups[group_id].load(group_data)
 
-        watched = [e for e in self._source_entities() if e]
+        watched = self._source_entities()
         if watched:
             self._unsubs.append(async_track_state_change_event(self.hass, watched, self._handle_state_change))
         self._unsubs.append(
-            async_track_time_interval(self.hass, self._handle_interval, timedelta(seconds=UPDATE_INTERVAL_S))
+            async_track_time_interval(
+                self.hass, self._handle_interval, timedelta(seconds=self.update_interval_s)
+            )
         )
         self._evaluate()
 
@@ -223,33 +271,24 @@ class HvacSimulatorManager:
 
     def _data_to_save(self) -> dict[str, Any]:
         return {
-            "learner": self.learner.as_dict(),
+            "rooms": {rid: room.as_dict() for rid, room in self.rooms.items()},
             "appliances": {k: s.as_dict() for k, s in self.sims.items()},
-            "last_taught": self.last_taught,
-            "occupancy": self.occupancy.as_dict(),
+            "plugs": {k: p.as_dict() for k, p in self.plugs.items()},
             "activity_override": self.activity_override,
             "last_ratings": self.last_ratings,
-            "gains": self.gains.as_dict(),
-            "fan_groups": {k: g.as_dict() for k, g in self.fan_groups.items()},
         }
 
     def _schedule_save(self) -> None:
         self._store.async_delay_save(self._data_to_save, _SAVE_DELAY_S)
 
     def _source_entities(self) -> list[str]:
-        entities = [
-            self.config.get(CONF_INDOOR_TEMP),
-            self.config.get(CONF_INDOOR_HUMIDITY),
-            self.config.get(CONF_OUTDOOR_TEMP),
-            self.config.get(CONF_OUTDOOR_HUMIDITY),
-            self.config.get(CONF_AIR_QUALITY),
-            self.config.get(CONF_CO2),
-        ]
-        entities.extend(self.config.get(CONF_OPENINGS) or [])
+        entities = [self.config.get(CONF_OUTDOOR_TEMP), self.config.get(CONF_OUTDOOR_HUMIDITY)]
+        for rc in self.room_configs:
+            entities.extend(rc.entities)
         entities.extend(a.power_entity for a in self.heat_sources)
-        return [e for e in entities if e]
+        return sorted({e for e in entities if e})
 
-    # --- reading sensors -------------------------------------------------
+    # --- reading sensors -------------------------------------------------------
 
     def _read_number(self, entity_id: str | None, attr: str | None = None) -> float | None:
         if not entity_id:
@@ -284,11 +323,11 @@ class HvacSimulatorManager:
             return TemperatureConverter.convert(value, UnitOfTemperature.KELVIN, UnitOfTemperature.CELSIUS)
         return value
 
-    def openings_open(self) -> list[str]:
-        """Entity ids of doors/windows currently open."""
+    def openings_open(self, room_id: str = MAIN_ROOM) -> list[str]:
+        """Entity ids of a room's doors/windows that are open."""
         return [
             e
-            for e in self.config.get(CONF_OPENINGS) or []
+            for e in self.rooms[room_id].config.openings
             if (s := self.hass.states.get(e)) is not None and s.state == STATE_ON
         ]
 
@@ -299,7 +338,7 @@ class HvacSimulatorManager:
         return state.state == "above_horizon"
 
     def _read_source_power(self) -> dict[str, float]:
-        """Measured power (W) of each heat source, zero below its on-threshold."""
+        """Measured power (W) of each heat source, zero below its off threshold."""
         powers: dict[str, float] = {}
         for source in self.heat_sources:
             watts = self._read_number(source.power_entity)
@@ -311,97 +350,118 @@ class HvacSimulatorManager:
             powers[source.id] = watts if watts >= source.on_threshold_w else 0.0
         return powers
 
-    def _take_sample(self, now: float) -> Sample:
+    def _take_samples(self, now: float) -> None:
         self.source_power = self._read_source_power()
-        return Sample(
-            ts=now,
-            t_in=self._read_temperature(self.config.get(CONF_INDOOR_TEMP)),
-            rh_in=self._read_number(self.config.get(CONF_INDOOR_HUMIDITY), "humidity"),
-            aq=self._read_number(self.config.get(CONF_AIR_QUALITY)),
-            t_out=self._read_temperature(self.config.get(CONF_OUTDOOR_TEMP)),
-            rh_out=self._read_number(self.config.get(CONF_OUTDOOR_HUMIDITY), "humidity"),
-            co2=self._read_number(self.config.get(CONF_CO2)),
-            is_open=bool(self.openings_open()),
-            gains=dict(self.source_power),
-        )
+        t_out = self._read_temperature(self.config.get(CONF_OUTDOOR_TEMP))
+        rh_out = self._read_number(self.config.get(CONF_OUTDOOR_HUMIDITY), "humidity")
+        for room in self.rooms.values():
+            rc = room.config
+            room.add_sample(
+                Sample(
+                    ts=now,
+                    t_in=self._read_temperature(rc.temperature),
+                    rh_in=self._read_number(rc.humidity, "humidity"),
+                    aq=self._read_number(rc.air_quality),
+                    t_out=t_out,
+                    rh_out=rh_out,
+                    co2=self._read_number(rc.co2),
+                    is_open=bool(self.openings_open(rc.id)),
+                    gains={s.id: self.source_power.get(s.id, 0.0) for s in room.heat_sources},
+                )
+            )
 
-    # --- evaluation ------------------------------------------------------
+    # --- evaluation -------------------------------------------------------------
 
     @callback
     def _handle_state_change(self, event: Event) -> None:
         now = time.time()
         was_running = {k for k, w in self.source_power.items() if w}
-        self.buffer.add(self._take_sample(now))
+        self._take_samples(now)
         is_running = {k for k, w in self.source_power.items() if w}
         entity_id = event.data.get("entity_id", "")
+        openings = {e for rc in self.room_configs for e in rc.openings}
+        min_gap = MIN_EVAL_GAP_ON_CHANGE_S if self.update_on_change else _MIN_EVAL_GAP_S
         # Doors/windows and heat sources switching on/off change the picture
         # immediately; other sensors wait for the throttle.
-        if (
-            entity_id in (self.config.get(CONF_OPENINGS) or [])
-            or was_running != is_running
-            or now - self._last_eval >= _MIN_EVAL_GAP_S
-        ):
-            self._evaluate(sample_taken=True)
+        if entity_id in openings or was_running != is_running or now - self._last_eval >= min_gap:
+            self._evaluate(samples_taken=True)
 
     @callback
     def _handle_interval(self, _now: Any) -> None:
         self._evaluate()
 
-    @property
-    def tuning(self) -> Tuning:
-        """Base tuning with learned passive and ventilation rates applied."""
-        tuning = self.learner.apply_to_tuning(self.base_tuning)
-        tuning.ach_natural = self.occupancy.ach(VENT_CLOSED)
-        return tuning
+    def _vent_state(self, room: Room) -> str:
+        if self.openings_open(room.id) or room.estimated_open:
+            return VENT_OPEN
+        if any(
+            s.status != STATUS_OFF
+            and s.appliance.cause_for_mode(s.mode) == CAUSE_VENTILATION
+            and self.appliance_room[s.appliance.id] in self.zone_of(room.id)
+            for s in self.sims.values()
+        ):
+            return VENT_FAN
+        return VENT_CLOSED
+
+    def _shower_in_zone(self, room: Room, now: float) -> bool:
+        return any(
+            self.rooms[rid].last_shower_ts is not None
+            and now - self.rooms[rid].last_shower_ts <= SHOWER_AFTERGLOW_S
+            for rid in self.zone_of(room.id)
+        )
 
     @callback
-    def _evaluate(self, sample_taken: bool = False) -> None:
+    def _evaluate(self, samples_taken: bool = False) -> None:
         now = time.time()
         self._last_eval = now
-        if not sample_taken:
-            self.buffer.add(self._take_sample(now))
-        tuning = self.tuning
-        mean_power = self.buffer.mean_gains(self.window_s, now)
-        self.cycle = detect_cycling(self.buffer.samples, now, CYCLE_HISTORY_S)
-        self.features = compute_features(
-            self.buffer,
-            now,
-            self.window_s,
-            tuning,
-            self._sun_up(),
-            dt_util.now().hour,
-            gains=self.gains.predict(mean_power),
-            cycle=self.cycle,
-        )
-        if self.features is not None:
-            rule = score_causes(self.features, tuning)
-            self.prediction = self.learner.predict(self.features, rule, self.appliances, tuning)
-        else:
-            self.prediction = None
+        if not samples_taken:
+            self._take_samples(now)
+        local = dt_util.now()
+        sun_up = self._sun_up()
+        for room in self.rooms.values():
+            observed = [s for s in self.sims.values() if self.appliance_room[s.appliance.id] == room.id]
+            room.evaluate(
+                now,
+                RoomContext(
+                    sun_up=sun_up,
+                    hour=local.hour,
+                    date=local.date().isoformat(),
+                    activity=self.activity,
+                    vent_state=self._vent_state(room),
+                    appliance_active=any(s.status == STATUS_ACTIVE for s in observed),
+                    shower_in_zone=self._shower_in_zone(room, now),
+                ),
+            )
 
-        label = self.prediction.label if self.prediction else None
-        confidence = self.prediction.confidence if self.prediction else 0.0
-        self._learn_gains(mean_power)
-        self._estimate_fans(tuning)
         warmup = self.window_s * EFFECTIVENESS_WARMUP_FRACTION
         for sim in self.sims.values():
-            # Another unit actively driving the room means this one can't be resting.
+            room = self.room_of(sim.appliance.id)
+            prediction = room.prediction
             others_active = any(
-                o.status == STATUS_ACTIVE and o.appliance.id != sim.appliance.id for o in self.sims.values()
+                o.status == STATUS_ACTIVE
+                and o.appliance.id != sim.appliance.id
+                and self.appliance_room[o.appliance.id] == room.id
+                for o in self.sims.values()
             )
             sim.update(
                 now,
-                self.features,
-                label,
-                confidence,
+                room.features,
+                prediction.label if prediction else None,
+                prediction.confidence if prediction else 0.0,
                 self.min_confidence,
                 self.hold_band,
                 others_active,
                 max_idle_s=self.max_idle_s,
                 effectiveness_warmup_s=warmup,
-                fan_estimate=self.fan_estimates.get(sim.appliance.id),
+                fan_estimate=room.fan_estimates.get(sim.appliance.id),
             )
-        self._update_occupancy()
+            if sim.last_event:
+                self.hass.bus.async_fire(
+                    EVENT_APPLIANCE,
+                    {"entry_id": self.entry_id, "appliance_id": sim.appliance.id, "event": sim.last_event},
+                )
+                sim.last_event = None
+        for plug_id, plug in self.plugs.items():
+            plug.update(now, self.source_power.get(plug_id))
         self._check_effectiveness()
         self._teach_from_manual(now)
         self._schedule_save()
@@ -409,109 +469,17 @@ class HvacSimulatorManager:
 
     def _teach_from_manual(self, now: float) -> None:
         """A manually-set mode is ground truth: learn from it periodically."""
-        if not self.learn_from_manual or self.features is None:
+        if not self.learn_from_manual:
             return
         for sim in self.sims.values():
             if sim.manual_mode in (MANUAL_AUTO, "off") or sim.status != STATUS_ACTIVE:
                 continue
-            cause = sim.appliance.cause_for_mode(sim.manual_mode)
-            if cause is None:
-                continue
             if now - self._last_manual_teach.get(sim.appliance.id, 0.0) < MANUAL_TEACH_INTERVAL_S:
                 continue
             self._last_manual_teach[sim.appliance.id] = now
-            self.learner.teach(self.features, make_label(cause, sim.appliance.id), source="manual", now=now)
+            self.room_of(sim.appliance.id).teach_mode(sim.appliance, sim.manual_mode, now, "manual")
 
-    @property
-    def simulated(self) -> list[Appliance]:
-        """Appliances whose state is inferred (everything except heat sources)."""
-        return [sim.appliance for sim in self.sims.values()]
-
-    # --- heat sources ----------------------------------------------------
-
-    def _learn_gains(self, mean_power: dict[str, float]) -> None:
-        """Learn heat-source effects only when nothing else could be causing the change."""
-        f = self.features
-        if (
-            f is None
-            or f.is_open
-            or not any(w > 0 for w in mean_power.values())
-            or any(sim.status == STATUS_ACTIVE for sim in self.sims.values())
-        ):
-            return
-        if self.prediction is not None and split_label(self.prediction.label)[0] in ACTIVE_CAUSES:
-            return
-        self.gains.learn(mean_power, f.r_t_raw - f.expected_passive, f.r_h_raw)
-
-    def source_effects(self) -> dict[str, tuple[float, float]]:
-        """Current (°C/h, %RH/h) of each heat source."""
-        return self.gains.per_source(self.buffer.mean_gains(self.window_s, time.time()))
-
-    # --- fan groups ------------------------------------------------------
-
-    def _excess_ach(self, tuning: Tuning) -> float | None:
-        f = self.features
-        if f is None or f.ach_obs is None:
-            return None
-        return f.ach_obs - tuning.ach_natural
-
-    def _estimate_fans(self, tuning: Tuning) -> None:
-        excess = self._excess_ach(tuning)
-        self.fan_estimates = {gid: g.estimate(excess) for gid, g in self.fan_groups.items()}
-
-    def calibrate_fans(self, appliance_id: str, fans_on: list[str] | None, count: int | None) -> bool:
-        """Record which fans (or how many) are running right now."""
-        group = self.fan_groups.get(appliance_id)
-        excess = self._excess_ach(self.tuning)
-        if group is None or excess is None:
-            return False
-        ok = group.calibrate(time.time(), excess, fans_on, count)
-        if ok:
-            self._evaluate()
-        return ok
-
-    def set_manual_units(self, appliance_id: str, units: int | None) -> None:
-        self.sims[appliance_id].manual_units = units
-        self._evaluate()
-
-    # --- differentials ---------------------------------------------------
-
-    @property
-    def differentials(self) -> dict[str, float | None]:
-        """Indoor minus outdoor for each paired reading, plus CO2 above outdoor air."""
-        f = self.features
-        latest = self.buffer.latest
-        t_in, t_out = latest("t_in"), latest("t_out")
-        rh_in, rh_out = latest("rh_in"), latest("rh_out")
-        ah_in, ah_out = absolute_humidity(t_in, rh_in), absolute_humidity(t_out, rh_out)
-        co2 = latest("co2")
-
-        def diff(a: float | None, b: float | None) -> float | None:
-            return None if a is None or b is None else a - b
-
-        return {
-            "temperature": diff(t_in, t_out),
-            "humidity": diff(rh_in, rh_out),
-            "absolute_humidity_in": ah_in,
-            "absolute_humidity_out": ah_out,
-            "absolute_humidity": diff(ah_in, ah_out),
-            "co2_excess": None if co2 is None else co2 - self.base_tuning.co2_outdoor,
-            "temperature_rate_raw": None if f is None else f.r_t_raw,
-            "humidity_rate_raw": None if f is None else f.r_h_raw,
-        }
-
-    # --- occupancy -------------------------------------------------------
-
-    @property
-    def vent_state(self) -> str:
-        if self.openings_open():
-            return VENT_OPEN
-        if any(
-            s.status != STATUS_OFF and s.appliance.cause_for_mode(s.mode) == CAUSE_VENTILATION
-            for s in self.sims.values()
-        ):
-            return VENT_FAN
-        return VENT_CLOSED
+    # --- occupancy / activity -----------------------------------------------------
 
     @property
     def activity(self) -> str:
@@ -523,43 +491,18 @@ class HvacSimulatorManager:
         asleep = start <= hour < end if start < end else hour >= start or hour < end
         return ACTIVITY_SLEEPING if asleep else ACTIVITY_RESTING
 
-    def _update_occupancy(self) -> None:
-        f = self.features
-        estimate = self.occupancy.estimate(
-            f.co2 if f else None, f.r_co2 if f else None, self.vent_state, self.activity
-        )
-        if estimate is None:
-            self.occupancy_estimate = None
-            return
-        raw = estimate["people"]
-        if self._people_smoothed is None:
-            self._people_smoothed = raw
-        else:
-            self._people_smoothed += _OCCUPANCY_EMA * (raw - self._people_smoothed)
-        estimate["people_smoothed"] = self._people_smoothed
-        estimate["calibrations"] = self.occupancy.calibration_count
-        self.occupancy_estimate = estimate
-
-    def calibrate_occupancy(self, people: int, activity: str | None) -> bool:
-        f = self.features
-        ok = self.occupancy.calibrate(
-            time.time(),
-            people,
-            activity or self.activity,
-            self.vent_state,
-            f.co2 if f else None,
-            f.r_co2 if f else None,
-        )
-        if ok:
-            self._people_smoothed = float(people)
-            self._evaluate()
-        return ok
-
     def set_activity(self, activity: str) -> None:
         self.activity_override = activity
         self._evaluate()
 
-    # --- effectiveness ---------------------------------------------------
+    def calibrate_occupancy(self, room_id: str, people: int, activity: str | None) -> bool:
+        room = self.rooms[room_id]
+        ok = room.calibrate_occupancy(time.time(), people, activity or self.activity, self._vent_state(room))
+        if ok:
+            self._evaluate()
+        return ok
+
+    # --- effectiveness ---------------------------------------------------------------
 
     def _check_effectiveness(self) -> None:
         for appliance_id, sim in self.sims.items():
@@ -603,7 +546,17 @@ class HvacSimulatorManager:
                 self.hass.services.async_call(domain, service, {"title": title, "message": message})
             )
 
-    # --- calibration -----------------------------------------------------
+    # --- actions used by entities and services -----------------------------------------
+
+    def teach(self, room_id: str, label: str) -> bool:
+        ok = self.rooms[room_id].teach(label, time.time())
+        if ok:
+            self._evaluate()
+        return ok
+
+    def confirm(self, room_id: str) -> bool:
+        room = self.rooms[room_id]
+        return room.prediction is not None and self.teach(room_id, room.prediction.label)
 
     def calibrate(
         self,
@@ -613,81 +566,43 @@ class HvacSimulatorManager:
         setpoint: float | None,
         filter_status: str | None,
     ) -> None:
-        """Record ground truth for an appliance and teach the classifier from it."""
+        """Record ground truth for an appliance and teach its room's classifier from it."""
         sim = self.sims[appliance_id]
-        f = self.features
-        sim.calibrate(time.time(), f.t_in if f else None, mode, status, setpoint, filter_status)
+        room = self.room_of(appliance_id)
+        f = room.features
+        now = time.time()
+        sim.calibrate(now, f.t_in if f else None, mode, status, setpoint, filter_status)
         if filter_status == "clean":
             self.last_ratings.pop(appliance_id, None)
-        if f is not None and mode is not None and status in (None, STATUS_ACTIVE):
-            cause = sim.appliance.cause_for_mode(mode)
-            if cause is not None:
-                self.learner.teach(f, make_label(cause, appliance_id), source="calibration")
+        if mode is not None and status in (None, STATUS_ACTIVE):
+            room.teach_mode(sim.appliance, mode, now, "calibration")
         self._evaluate()
 
-    # --- public API used by entities and services ------------------------
+    def calibrate_fans(self, appliance_id: str, fans_on: list[str] | None, count: int | None) -> bool:
+        ok = self.room_of(appliance_id).calibrate_fans(time.time(), appliance_id, fans_on, count)
+        if ok:
+            self._evaluate()
+        return ok
 
-    @property
-    def labels(self) -> list[str]:
-        return available_labels(self.appliances)
-
-    def label_name(self, label: str | None) -> str | None:
-        if label is None:
-            return None
-        return label_name(label, self.appliances)
-
-    def label_from_name(self, name: str) -> str | None:
-        """Accept either a label key or its display name."""
-        for label in self.labels:
-            if name in (label, self.label_name(label)):
-                return label
-        return None
-
-    @property
-    def needs_feedback(self) -> bool:
-        """An active suggestion that the engine is unsure about."""
-        p = self.prediction
-        if p is None:
-            return False
-        cause, _ = split_label(p.label)
-        return cause in ACTIVE_CAUSES and p.confidence < FEEDBACK_CONFIDENCE
-
-    def teach(self, label: str) -> bool:
-        """User says ``label`` is what is actually happening now."""
-        if label not in self.labels or self.features is None:
-            return False
-        suggested = self.prediction.label if self.prediction else None
-        self.learner.teach(self.features, label, source="feedback", was_suggested=suggested)
-        self.last_taught = label
-        _LOGGER.debug("Taught %s (suggested %s)", label, suggested)
-        self._evaluate()
-        return True
-
-    def confirm(self) -> bool:
-        """User says the current suggestion is right."""
-        if self.prediction is None:
-            return False
-        return self.teach(self.prediction.label)
-
-    def reset_learning(self) -> None:
-        self.learner.reset()
-        self.occupancy.reset()
-        self.gains.reset()
-        for group in self.fan_groups.values():
-            group.reset()
-        self.last_taught = None
-        self.last_ratings = {}
-        for sim in self.sims.values():
-            sim.reset_learning()
+    def reset_learning(self, room_id: str | None = None) -> None:
+        targets = [self.rooms[room_id]] if room_id else list(self.rooms.values())
+        for room in targets:
+            room.reset_learning()
+        if room_id in (None, MAIN_ROOM):
+            self.last_ratings = {}
+            for sim in self.sims.values():
+                sim.reset_learning()
         self._evaluate()
 
     def set_manual(self, appliance_id: str, mode: str | None, setpoint: float | None) -> None:
         sim = self.sims[appliance_id]
+        sim.set_manual(time.time(), mode, setpoint)
         if mode is not None:
-            sim.manual_mode = mode
             self._last_manual_teach.pop(appliance_id, None)
-        if setpoint is not None:
-            sim.manual_setpoint = sim.appliance.clamp_setpoint(setpoint)
+        self._evaluate()
+
+    def set_manual_units(self, appliance_id: str, units: int | None) -> None:
+        self.sims[appliance_id].manual_units = units
         self._evaluate()
 
     def clear_manual_setpoint(self, appliance_id: str) -> None:

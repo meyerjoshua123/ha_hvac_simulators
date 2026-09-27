@@ -29,6 +29,11 @@ SENSOR_KEYS = (
     CONF_AQ_LOWER_IS_BETTER,
     CONF_OPENINGS,
     CONF_SUN_ENTITY,
+    "main_area",
+    "main_type",
+    "main_air_gaps",
+    "main_air_gap_notes",
+    "use_virtual_openings",
 )
 
 # Tuning (options)
@@ -49,6 +54,17 @@ CONF_SLEEP_START = "sleep_start_hour"
 CONF_SLEEP_END = "sleep_end_hour"
 CONF_NOTIFY_SERVICE = "notify_service"
 CONF_NOTIFY_RATING = "notify_rating"
+CONF_SOLAR_MARGIN = "solar_margin"
+CONF_UPDATE_MODE = "update_mode"
+CONF_UPDATE_INTERVAL = "update_interval_s"
+# Main room (the space's own sensors) and extra rooms
+CONF_MAIN_AREA = "main_area"
+CONF_MAIN_TYPE = "main_type"
+CONF_MAIN_AIR_GAPS = "main_air_gaps"
+CONF_MAIN_AIR_GAP_NOTES = "main_air_gap_notes"
+CONF_MAIN_FLOWS_INTO = "main_flows_into"
+CONF_USE_VIRTUAL_OPENINGS = "use_virtual_openings"
+CONF_ROOMS = "rooms"
 
 DEFAULT_WINDOW_MINUTES = 15
 DEFAULT_SOLAR_THRESHOLD = 22.0
@@ -66,6 +82,12 @@ DEFAULT_VOLUME = 100.0
 DEFAULT_SLEEP_START = 23
 DEFAULT_SLEEP_END = 7
 DEFAULT_NOTIFY_RATING = "ok"
+DEFAULT_SOLAR_MARGIN = 2.0
+UPDATE_MODE_INTERVAL = "interval"
+UPDATE_MODE_ON_CHANGE = "on_change"
+DEFAULT_UPDATE_INTERVAL = 60
+# Never evaluate more often than this, even on every sensor change.
+MIN_EVAL_GAP_ON_CHANGE_S = 2
 # Don't sample effectiveness until the trend window reflects active running.
 EFFECTIVENESS_WARMUP_FRACTION = 0.6
 
@@ -105,6 +127,7 @@ SERVICE_CALIBRATE = "calibrate"
 SERVICE_CALIBRATE_OCCUPANCY = "calibrate_occupancy"
 
 EVENT_EFFECTIVENESS = DOMAIN + "_effectiveness_changed"
+EVENT_APPLIANCE = DOMAIN + "_appliance_event"
 
 ATTR_LABEL = "label"
 ATTR_MODE = "mode"
@@ -115,3 +138,8 @@ ATTR_PEOPLE = "people"
 ATTR_ACTIVITY = "activity"
 ATTR_FANS = "fans"
 ATTR_FANS_ON = "fans_on"
+CONF_KIND = "kind"
+CONF_ACTIVE_ABOVE_W = "active_above_w"
+CONF_ROOM = "room"
+CONF_MANUAL_TIMEOUT = "manual_timeout_min"
+CONF_OFF_DETECT = "off_detect_min"

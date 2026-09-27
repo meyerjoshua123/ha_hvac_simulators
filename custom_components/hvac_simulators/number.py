@@ -10,9 +10,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import HvacSimConfigEntry
 from .appliances import Appliance
-from .const import CONF_CO2
 from .entity import ApplianceEntity, HvacSimEntity
 from .manager import HvacSimulatorManager
+from .room import Room
 
 
 async def async_setup_entry(
@@ -20,9 +20,14 @@ async def async_setup_entry(
 ) -> None:
     manager = entry.runtime_data
     entities: list[NumberEntity] = [SetpointNumber(manager, a) for a in manager.simulated if a.has_setpoint]
-    if manager.config.get(CONF_CO2):
-        entities.append(PeopleCalibrationNumber(manager))
-        entities.extend(FansCalibrationNumber(manager, a) for a in manager.simulated if a.is_fan_group)
+    for room in manager.rooms.values():
+        if room.config.co2:
+            entities.append(PeopleCalibrationNumber(manager, room))
+    entities.extend(
+        FansCalibrationNumber(manager, a)
+        for a in manager.simulated
+        if a.is_fan_group and manager.room_of(a.id).config.co2
+    )
     async_add_entities(entities)
 
 
@@ -61,8 +66,8 @@ class PeopleCalibrationNumber(HvacSimEntity, NumberEntity):
     _attr_native_step = 1
     _attr_mode = NumberMode.BOX
 
-    def __init__(self, manager: HvacSimulatorManager) -> None:
-        super().__init__(manager, "people_calibration")
+    def __init__(self, manager: HvacSimulatorManager, room: Room) -> None:
+        super().__init__(manager, "people_calibration", room)
         self._last: float | None = None
 
     @callback
@@ -70,7 +75,7 @@ class PeopleCalibrationNumber(HvacSimEntity, NumberEntity):
         self._attr_native_value = self._last
 
     async def async_set_native_value(self, value: float) -> None:
-        if not self.manager.calibrate_occupancy(int(value), None):
+        if not self.manager.calibrate_occupancy(self.room.id, int(value), None):
             raise HomeAssistantError("Need CO2 history before calibrating; try again in a few minutes")
         self._last = value
 

@@ -28,7 +28,8 @@ MIN_KW = 0.02
 class HeatSourceModel:
     """Effect of one heat source per kW of measured power."""
 
-    def __init__(self) -> None:
+    def __init__(self, prior_h_per_kw: float = PRIOR_H_PER_KW) -> None:
+        self.prior_h_per_kw = prior_h_per_kw
         self.samples: list[tuple[float, float, float | None]] = []  # (kW, °C/h, %/h)
 
     def as_dict(self) -> dict[str, Any]:
@@ -57,7 +58,7 @@ class HeatSourceModel:
     @property
     def per_kw_h(self) -> float:
         pts = [(p, h) for p, _, h in self.samples if h is not None]
-        num = sum(p * h for p, h in pts) + PRIOR_WEIGHT * PRIOR_H_PER_KW
+        num = sum(p * h for p, h in pts) + PRIOR_WEIGHT * self.prior_h_per_kw
         den = sum(p * p for p, _ in pts) + PRIOR_WEIGHT
         return num / den
 
@@ -75,14 +76,20 @@ class GainsModel:
     def as_dict(self) -> dict[str, Any]:
         return {k: m.as_dict() for k, m in self.sources.items()}
 
-    def load(self, data: dict[str, Any] | None, source_ids: list[str]) -> None:
-        self.sources = {sid: HeatSourceModel() for sid in source_ids}
+    def load(
+        self,
+        data: dict[str, Any] | None,
+        source_ids: list[str],
+        moisture_priors: dict[str, float] | None = None,
+    ) -> None:
+        priors = moisture_priors or {}
+        self.sources = {sid: HeatSourceModel(priors.get(sid, PRIOR_H_PER_KW)) for sid in source_ids}
         for sid, raw in (data or {}).items():
             if sid in self.sources:
                 self.sources[sid].load(raw)
 
     def reset(self) -> None:
-        self.sources = {sid: HeatSourceModel() for sid in self.sources}
+        self.sources = {sid: HeatSourceModel(m.prior_h_per_kw) for sid, m in self.sources.items()}
 
     def per_source(self, powers: dict[str, float]) -> dict[str, tuple[float, float]]:
         return {sid: self.sources[sid].effect(w) for sid, w in powers.items() if sid in self.sources}

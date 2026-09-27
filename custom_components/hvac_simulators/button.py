@@ -12,13 +12,17 @@ from . import HvacSimConfigEntry
 from .appliances import Appliance
 from .entity import ApplianceEntity, HvacSimEntity
 from .manager import HvacSimulatorManager
+from .room import Room
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: HvacSimConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     manager = entry.runtime_data
-    entities: list[ButtonEntity] = [ConfirmButton(manager), ResetLearningButton(manager)]
+    entities: list[ButtonEntity] = []
+    for room in manager.rooms.values():
+        if room.config.sensed:
+            entities += [ConfirmButton(manager, room), ResetLearningButton(manager, room)]
     for appliance in manager.simulated:
         if appliance.has_setpoint:
             entities.append(ClearSetpointButton(manager, appliance))
@@ -33,11 +37,11 @@ class ConfirmButton(HvacSimEntity, ButtonEntity):
     _attr_name = "Suggestion is correct"
     _attr_icon = "mdi:thumb-up"
 
-    def __init__(self, manager: HvacSimulatorManager) -> None:
-        super().__init__(manager, "confirm")
+    def __init__(self, manager: HvacSimulatorManager, room: Room) -> None:
+        super().__init__(manager, "confirm", room)
 
     async def async_press(self) -> None:
-        if not self.manager.confirm():
+        if not self.manager.confirm(self.room.id):
             raise HomeAssistantError("No suggestion yet; wait for sensor history to build up")
 
 
@@ -46,11 +50,11 @@ class ResetLearningButton(HvacSimEntity, ButtonEntity):
     _attr_icon = "mdi:restore"
     _attr_entity_category = EntityCategory.CONFIG
 
-    def __init__(self, manager: HvacSimulatorManager) -> None:
-        super().__init__(manager, "reset_learning")
+    def __init__(self, manager: HvacSimulatorManager, room: Room) -> None:
+        super().__init__(manager, "reset_learning", room)
 
     async def async_press(self) -> None:
-        self.manager.reset_learning()
+        self.manager.reset_learning(self.room.id)
 
 
 class ClearSetpointButton(ApplianceEntity, ButtonEntity):

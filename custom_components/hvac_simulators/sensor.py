@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -16,13 +18,16 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from . import HvacSimConfigEntry
 from .appliances import TYPE_AIRCON, Appliance
-from .const import CONF_CO2
+from .const import CONF_OUTDOOR_TEMP
 from .effectiveness import RATING_NAMES, RATINGS
 from .entity import ApplianceEntity, HvacSimEntity
 from .manager import HvacSimulatorManager
+from .plugs import KIND_NAMES, PLUG_STATUSES
+from .room import Room, RoomConfig
 from .simulator import STATUSES
 
 _MAX_PROBS_IN_ATTRS = 5
@@ -32,48 +37,110 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: HvacSimConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     manager = entry.runtime_data
-    entities: list[SensorEntity] = [
-        SuggestedModeSensor(manager),
-        ConfidenceSensor(manager),
-        TrendSensor(
-            manager, "temperature_trend", "Temperature trend", "r_t", "°C/h", "mdi:thermometer-lines"
-        ),
-        TrendSensor(manager, "humidity_trend", "Humidity trend", "r_h", "%/h", "mdi:water-percent"),
-        TrendSensor(
-            manager, "air_quality_trend", "Air quality trend", "r_aq", "%/h", "mdi:air-filter", scale=100.0
-        ),
-        TrendSensor(manager, "co2_trend", "CO2 trend", "r_co2", "ppm/h", "mdi:molecule-co2"),
-        TrendSensor(manager, "air_changes", "Air changes per hour", "ach_obs", "1/h", "mdi:weather-windy"),
-        LearningSensor(manager),
-    ]
-    if manager.config.get(CONF_CO2):
-        entities.append(OccupancySensor(manager))
-    diffs = [
-        ("temperature", "Indoor-outdoor temperature difference", "°C", "mdi:thermometer-chevron-up"),
-        ("humidity", "Indoor-outdoor humidity difference", PERCENTAGE, "mdi:water-percent"),
-        ("absolute_humidity_in", "Indoor absolute humidity", "g/m³", "mdi:water"),
-        ("absolute_humidity_out", "Outdoor absolute humidity", "g/m³", "mdi:water-outline"),
-        ("absolute_humidity", "Indoor-outdoor absolute humidity difference", "g/m³", "mdi:water-sync"),
-        ("co2_excess", "CO2 above outdoor", "ppm", "mdi:molecule-co2"),
-    ]
-    entities.extend(DifferentialSensor(manager, *d) for d in diffs)
-    if manager.heat_sources:
-        entities += [
-            DifferentialSensor(
-                manager, "temperature_rate_raw", "Temperature trend (raw)", "°C/h", "mdi:thermometer-lines"
-            ),
-            DifferentialSensor(
-                manager, "humidity_rate_raw", "Humidity trend (raw)", "%/h", "mdi:water-percent"
-            ),
-            TrendSensor(
-                manager, "appliance_heat", "Appliance heat effect", "gain_t", "°C/h", "mdi:heat-wave"
-            ),
-            TrendSensor(
-                manager, "appliance_moisture", "Appliance moisture effect", "gain_h", "%/h", "mdi:water-plus"
-            ),
-        ]
+    has_outdoor = bool(manager.config.get(CONF_OUTDOOR_TEMP))
+    entities: list[SensorEntity] = []
+    for room in manager.rooms.values():
+        rc = room.config
+        if rc.sensed:
+            entities += [
+                SuggestedModeSensor(manager, room),
+                ConfidenceSensor(manager, room),
+                LearningSensor(manager, room),
+            ]
+            entities.append(
+                TrendSensor(
+                    manager,
+                    room,
+                    "temperature_trend",
+                    "Temperature trend",
+                    "r_t",
+                    "°C/h",
+                    "mdi:thermometer-lines",
+                )
+            )
+            entities += [EfficiencySensor(manager, room, *spec) for spec in EFFICIENCY_SENSORS]
+        if rc.humidity:
+            entities.append(
+                TrendSensor(
+                    manager, room, "humidity_trend", "Humidity trend", "r_h", "%/h", "mdi:water-percent"
+                )
+            )
+        if rc.air_quality:
+            entities.append(
+                TrendSensor(
+                    manager,
+                    room,
+                    "air_quality_trend",
+                    "Air quality trend",
+                    "r_aq",
+                    "%/h",
+                    "mdi:air-filter",
+                    scale=100.0,
+                )
+            )
+        if rc.co2:
+            entities += [
+                TrendSensor(manager, room, "co2_trend", "CO2 trend", "r_co2", "ppm/h", "mdi:molecule-co2"),
+                TrendSensor(
+                    manager,
+                    room,
+                    "air_changes",
+                    "Air changes per hour",
+                    "ach_obs",
+                    "1/h",
+                    "mdi:weather-windy",
+                ),
+                OccupancySensor(manager, room),
+            ]
+        # Rate of change since the last reading and over 5/10/15 minutes (hidden by default).
+        for attr, label, unit, present in (
+            ("t_in", "Temperature", "°C/h", rc.temperature),
+            ("rh_in", "Humidity", "%/h", rc.humidity),
+            ("co2", "CO2", "ppm/h", rc.co2),
+        ):
+            if present:
+                entities += [RateSensor(manager, room, attr, label, unit, window) for window in RATE_KEYS]
+        if has_outdoor:
+            entities += [DifferentialSensor(manager, room, *d) for d in OUTDOOR_DIFFS if _has(rc, d[0])]
+        if not rc.is_main and manager.main.config.sensed:
+            entities += [RoomDifferenceSensor(manager, room, *d) for d in ROOM_DIFFS if _has(rc, d[0])]
+        if room.heat_sources:
+            entities += [
+                DifferentialSensor(
+                    manager,
+                    room,
+                    "temperature_rate_raw",
+                    "Temperature trend (raw)",
+                    "°C/h",
+                    "mdi:thermometer-lines",
+                ),
+                TrendSensor(
+                    manager,
+                    room,
+                    "appliance_heat",
+                    "Appliance heat effect",
+                    "gain_t",
+                    "°C/h",
+                    "mdi:heat-wave",
+                ),
+            ]
+            if rc.humidity:
+                entities += [
+                    DifferentialSensor(
+                        manager, room, "humidity_rate_raw", "Humidity trend (raw)", "%/h", "mdi:water-percent"
+                    ),
+                    TrendSensor(
+                        manager,
+                        room,
+                        "appliance_moisture",
+                        "Appliance moisture effect",
+                        "gain_h",
+                        "%/h",
+                        "mdi:water-plus",
+                    ),
+                ]
     for source in manager.heat_sources:
-        entities.append(HeatSourceEffectSensor(manager, source))
+        entities += [HeatSourceEffectSensor(manager, source), PlugStatusSensor(manager, source)]
     for appliance in manager.simulated:
         if appliance.is_fan_group:
             entities.append(FansOnSensor(manager, appliance))
@@ -89,18 +156,54 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
+RATE_KEYS = ("last", "5m", "10m", "15m")
+OUTDOOR_DIFFS = (
+    ("temperature", "Indoor-outdoor temperature difference", "°C", "mdi:thermometer-chevron-up"),
+    ("humidity", "Indoor-outdoor humidity difference", PERCENTAGE, "mdi:water-percent"),
+    ("absolute_humidity_in", "Indoor absolute humidity", "g/m³", "mdi:water"),
+    ("absolute_humidity_out", "Outdoor absolute humidity", "g/m³", "mdi:water-outline"),
+    ("absolute_humidity", "Indoor-outdoor absolute humidity difference", "g/m³", "mdi:water-sync"),
+    ("co2_excess", "CO2 above outdoor", "ppm", "mdi:molecule-co2"),
+)
+ROOM_DIFFS = (
+    ("temperature", "Temperature difference to main room", "°C", "mdi:home-thermometer"),
+    ("humidity", "Humidity difference to main room", PERCENTAGE, "mdi:water-percent"),
+    ("absolute_humidity", "Absolute humidity difference to main room", "g/m³", "mdi:water-sync"),
+)
+# key, name, unit, icon, source ("today" field or summary key)
+EFFICIENCY_SENSORS = (
+    ("heat_loss_coefficient", "Heat loss coefficient", "1/h", "mdi:home-thermometer-outline"),
+    ("heat_lost_ch", "Heat lost today", "°C·h", "mdi:thermometer-minus"),
+    ("heat_leaked_in_ch", "Heat leaked in today", "°C·h", "mdi:thermometer-plus"),
+    ("solar_gain_ch", "Solar gain today", "°C·h", "mdi:white-balance-sunny"),
+    ("appliance_heat_ch", "Appliance heat today", "°C·h", "mdi:heat-wave"),
+    ("air_changes", "Ventilation air changes today", "changes", "mdi:weather-windy"),
+)
+
+
+def _has(rc: RoomConfig, key: str) -> bool:
+    """Whether a room has the sensors a differential needs."""
+    if key in ("temperature",):
+        return rc.temperature is not None
+    if key == "co2_excess":
+        return rc.co2 is not None
+    if key.startswith("absolute_humidity"):
+        return rc.temperature is not None and rc.humidity is not None
+    return rc.humidity is not None
+
+
 class SuggestedModeSensor(HvacSimEntity, SensorEntity):
     """What the engine thinks is going on right now."""
 
     _attr_name = "Suggested mode"
     _attr_icon = "mdi:hvac"
 
-    def __init__(self, manager: HvacSimulatorManager) -> None:
-        super().__init__(manager, "suggested_mode")
+    def __init__(self, manager: HvacSimulatorManager, room: Room) -> None:
+        super().__init__(manager, "suggested_mode", room)
 
     @callback
     def _refresh(self) -> None:
-        m = self.manager
+        m = self.room
         p = m.prediction
         if p is None:
             self._attr_native_value = "Collecting data"
@@ -118,7 +221,8 @@ class SuggestedModeSensor(HvacSimEntity, SensorEntity):
             "reasons": p.reasons,
             "candidates": {m.label_name(k): round(v * 100, 1) for k, v in top},
             "learned_weight": round(p.learned_weight * 100, 1),
-            "openings_open": m.openings_open(),
+            "openings_open": self.manager.openings_open(m.id),
+            "opening_estimate": None if m.has_opening_sensors else m.opening_estimate,
             "features": m.features.as_dict() if m.features else None,
             "compressor_cycling": m.cycle,
         }
@@ -130,12 +234,12 @@ class ConfidenceSensor(HvacSimEntity, SensorEntity):
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
 
-    def __init__(self, manager: HvacSimulatorManager) -> None:
-        super().__init__(manager, "confidence")
+    def __init__(self, manager: HvacSimulatorManager, room: Room) -> None:
+        super().__init__(manager, "confidence", room)
 
     @callback
     def _refresh(self) -> None:
-        p = self.manager.prediction
+        p = self.room.prediction
         self._attr_native_value = None if p is None else round(p.confidence * 100, 1)
 
 
@@ -148,6 +252,7 @@ class TrendSensor(HvacSimEntity, SensorEntity):
     def __init__(
         self,
         manager: HvacSimulatorManager,
+        room: Room,
         key: str,
         name: str,
         feature: str,
@@ -155,7 +260,7 @@ class TrendSensor(HvacSimEntity, SensorEntity):
         icon: str,
         scale: float = 1.0,
     ) -> None:
-        super().__init__(manager, key)
+        super().__init__(manager, key, room)
         self._attr_name = name
         self._attr_native_unit_of_measurement = unit
         self._attr_icon = icon
@@ -164,7 +269,7 @@ class TrendSensor(HvacSimEntity, SensorEntity):
 
     @callback
     def _refresh(self) -> None:
-        f = self.manager.features
+        f = self.room.features
         value = None if f is None else getattr(f, self._feature)
         self._attr_native_value = None if value is None else round(value * self._scale, 2)
 
@@ -177,12 +282,12 @@ class LearningSensor(HvacSimEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, manager: HvacSimulatorManager) -> None:
-        super().__init__(manager, "learned_examples")
+    def __init__(self, manager: HvacSimulatorManager, room: Room) -> None:
+        super().__init__(manager, "learned_examples", room)
 
     @callback
     def _refresh(self) -> None:
-        learner = self.manager.learner
+        learner = self.room.learner
         accuracy = learner.accuracy
         self._attr_native_value = len(learner.samples)
         self._attr_extra_state_attributes = {
@@ -192,7 +297,7 @@ class LearningSensor(HvacSimEntity, SensorEntity):
             "learned_weight": round(learner.learned_weight() * 100, 1),
             "passive_rate_closed": learner.k_closed,
             "passive_rate_open": learner.k_open,
-            "last_taught": self.manager.label_name(self.manager.last_taught),
+            "last_taught": self.room.label_name(self.room.last_taught),
         }
 
 
@@ -238,12 +343,13 @@ class DifferentialSensor(HvacSimEntity, SensorEntity):
     def __init__(
         self,
         manager: HvacSimulatorManager,
+        room: Room,
         key: str,
         name: str,
         unit: str,
         icon: str,
     ) -> None:
-        super().__init__(manager, f"diff_{key}")
+        super().__init__(manager, f"diff_{key}", room)
         self._key = key
         self._attr_name = name
         self._attr_native_unit_of_measurement = unit
@@ -253,7 +359,7 @@ class DifferentialSensor(HvacSimEntity, SensorEntity):
 
     @callback
     def _refresh(self) -> None:
-        value = self.manager.differentials.get(self._key)
+        value = self.room.differentials().get(self._key)
         self._attr_native_value = None if value is None else round(value, 3)
 
 
@@ -270,8 +376,8 @@ class HeatSourceEffectSensor(ApplianceEntity, SensorEntity):
 
     @callback
     def _refresh(self) -> None:
-        model = self.manager.gains.sources.get(self.appliance.id)
-        effect_t, effect_h = self.manager.source_effects().get(self.appliance.id, (0.0, 0.0))
+        model = self.room.gains.sources.get(self.appliance.id)
+        effect_t, effect_h = self.room.source_effects(time.time()).get(self.appliance.id, (0.0, 0.0))
         self._attr_native_value = round(effect_t, 3)
         self._attr_extra_state_attributes = {
             "moisture_effect_pct_h": round(effect_h, 2),
@@ -279,6 +385,7 @@ class HeatSourceEffectSensor(ApplianceEntity, SensorEntity):
             "learned_c_per_kw_h": None if model is None else round(model.per_kw_t, 3),
             "learned_rh_per_kw_h": None if model is None else round(model.per_kw_h, 2),
             "samples": 0 if model is None else len(model.samples),
+            "room": self.room.name,
         }
 
 
@@ -295,8 +402,8 @@ class FansOnSensor(ApplianceEntity, SensorEntity):
     @callback
     def _refresh(self) -> None:
         sim = self.sim
-        group = self.manager.fan_groups[self.appliance.id]
-        estimate = self.manager.fan_estimates.get(self.appliance.id) or {}
+        group = self.room.fan_groups[self.appliance.id]
+        estimate = self.room.fan_estimates.get(self.appliance.id) or {}
         self._attr_native_value = sim.units_on
         self._attr_extra_state_attributes = {
             "of": self.appliance.count,
@@ -318,12 +425,12 @@ class OccupancySensor(HvacSimEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "people"
 
-    def __init__(self, manager: HvacSimulatorManager) -> None:
-        super().__init__(manager, "occupancy")
+    def __init__(self, manager: HvacSimulatorManager, room: Room) -> None:
+        super().__init__(manager, "occupancy", room)
 
     @callback
     def _refresh(self) -> None:
-        est = self.manager.occupancy_estimate
+        est = self.room.occupancy_estimate
         if est is None:
             self._attr_native_value = None
             self._attr_extra_state_attributes = {"activity": self.manager.activity}
@@ -365,6 +472,8 @@ class ApplianceStateSensor(ApplianceEntity, SensorEntity):
             "thermostat_offset": sim.thermostat_offset,
             "cycles": sim.cycles,
             "duty_cycle": None if duty is None else round(duty * 100, 1),
+            "manual_expires_at": sim.manual_expires_at,
+            "observed_in_room": self.room.name,
         }
 
 
@@ -440,4 +549,117 @@ class ApplianceSetpointSensor(ApplianceEntity, SensorEntity):
             "calibrations": sum(1 for c in sim.calibrations if c.get("setpoint") is not None),
             "min_setpoint": self.appliance.min_setpoint,
             "max_setpoint": self.appliance.max_setpoint,
+        }
+
+
+class RateSensor(HvacSimEntity, SensorEntity):
+    """Rate of change since the last reading, or over a fixed window."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+    _attr_icon = "mdi:chart-line-variant"
+
+    def __init__(
+        self, manager: HvacSimulatorManager, room: Room, attr: str, label: str, unit: str, window: str
+    ) -> None:
+        super().__init__(manager, f"rate_{attr}_{window}", room)
+        self._attr = attr
+        self._window = window
+        suffix = "since last reading" if window == "last" else f"over {window[:-1]} min"
+        self._attr_name = f"{label} rate {suffix}"
+        self._attr_native_unit_of_measurement = unit
+
+    @callback
+    def _refresh(self) -> None:
+        value = self.room.rates(self._attr, time.time()).get(self._window)
+        self._attr_native_value = None if value is None else round(value, 3)
+
+
+class RoomDifferenceSensor(HvacSimEntity, SensorEntity):
+    """This room minus the main room (e.g. laundry vs living room)."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self, manager: HvacSimulatorManager, room: Room, key: str, name: str, unit: str, icon: str
+    ) -> None:
+        super().__init__(manager, f"vs_main_{key}", room)
+        self._key = key
+        self._attr_name = name
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+
+    @callback
+    def _refresh(self) -> None:
+        value = self.room.differentials(self.manager.main).get(self._key)
+        self._attr_native_value = None if value is None else round(value, 3)
+
+
+class EfficiencySensor(HvacSimEntity, SensorEntity):
+    """Building efficiency record: heat lost, leaked in, solar gain... after removing HVAC and appliances."""
+
+    def __init__(
+        self, manager: HvacSimulatorManager, room: Room, key: str, name: str, unit: str, icon: str
+    ) -> None:
+        super().__init__(manager, f"efficiency_{key}", room)
+        self._key = key
+        self._attr_name = name
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_suggested_display_precision = 3
+        if key == "heat_loss_coefficient":
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        else:
+            # Resets at local midnight; the recorder keeps the daily history.
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    @callback
+    def _refresh(self) -> None:
+        tracker = self.room.efficiency
+        summary = tracker.summary()
+        if self._key == "heat_loss_coefficient":
+            self._attr_native_value = summary.get("heat_loss_coefficient")
+            self._attr_extra_state_attributes = {
+                "meaning": "°C per hour the room drifts per °C of indoor-outdoor difference, everything off and closed. Lower is better insulated.",
+                "last_30_days": summary,
+                "air_gaps": self.room.config.air_gaps,
+                "air_gap_notes": self.room.config.air_gap_notes or None,
+                "volume_m3": self.room.config.volume_m3,
+            }
+            return
+        today = tracker.today(dt_util.now().date().isoformat())
+        self._attr_native_value = today.get(self._key)
+        self._attr_extra_state_attributes = {
+            "average_per_day_30d": (summary.get("per_day") or {}).get(self._key)
+        }
+
+
+class PlugStatusSensor(ApplianceEntity, SensorEntity):
+    """Active / idle / off from the appliance's smart plug (fridge cycles, dryer running...)."""
+
+    _attr_name = "Status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(PLUG_STATUSES)
+    _attr_icon = "mdi:power-plug"
+
+    def __init__(self, manager: HvacSimulatorManager, appliance: Appliance) -> None:
+        super().__init__(manager, appliance, "plug_status")
+
+    @callback
+    def _refresh(self) -> None:
+        plug = self.manager.plugs[self.appliance.id]
+        duty = plug.duty_cycle
+        self._attr_native_value = plug.status
+        self._attr_extra_state_attributes = {
+            "kind": KIND_NAMES.get(plug.kind, plug.kind),
+            "power_w": plug.power_w,
+            "cycles": plug.cycles,
+            "duty_cycle_6h": None if duty is None else round(duty * 100, 1),
+            "running": plug.running,
+            "last_active_min": None if plug.last_active_s is None else round(plug.last_active_s / 60, 1),
+            "last_run_min": None if plug.last_run_s is None else round(plug.last_run_s / 60, 1),
+            "active_above_w": plug.active_above_w,
+            "off_below_w": plug.off_below_w,
         }

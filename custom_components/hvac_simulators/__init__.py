@@ -33,8 +33,10 @@ from .const import (
     SERVICE_SET_MANUAL,
     SERVICE_TEACH,
 )
+from .entity import room_identifier
 from .manager import HvacSimulatorManager
 from .occupancy import ACTIVITIES
+from .room import MAIN_ROOM
 from .simulator import STATUSES
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,7 +62,8 @@ def appliance_identifier(entry_id: str, appliance_id: str) -> str:
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register services once for all entries."""
 
-    def resolve(call: ServiceCall) -> tuple[HvacSimulatorManager, str | None]:
+    def resolve_target(call: ServiceCall) -> tuple[HvacSimulatorManager, str, str | None]:
+        """(manager, room id, appliance id or None) for the targeted device."""
         device = dr.async_get(hass).async_get(call.data[ATTR_DEVICE_ID])
         if device is None:
             raise ServiceValidationError("Unknown device")
@@ -72,28 +75,36 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 if not isinstance(manager, HvacSimulatorManager):
                     continue
                 if ident == entry.entry_id:
-                    return manager, None
+                    return manager, MAIN_ROOM, None
+                for room_id in manager.rooms:
+                    if ident == room_identifier(entry.entry_id, room_id):
+                        return manager, room_id, None
                 for appliance in manager.appliances:
                     if ident == appliance_identifier(entry.entry_id, appliance.id):
-                        return manager, appliance.id
-        raise ServiceValidationError("Device is not an HVAC Simulators space or appliance")
+                        return manager, manager.room_of(appliance.id).id, appliance.id
+        raise ServiceValidationError("Device is not an HVAC Simulators space, room or appliance")
+
+    def resolve(call: ServiceCall) -> tuple[HvacSimulatorManager, str | None]:
+        manager, _, appliance_id = resolve_target(call)
+        return manager, appliance_id
 
     async def handle_teach(call: ServiceCall) -> None:
-        manager, _ = resolve(call)
-        label = manager.label_from_name(call.data[ATTR_LABEL])
+        manager, room_id, _ = resolve_target(call)
+        room = manager.rooms[room_id]
+        label = room.label_from_name(call.data[ATTR_LABEL])
         if label is None:
-            raise ServiceValidationError(f"Unknown label. Valid: {', '.join(manager.labels)}")
-        if not manager.teach(label):
+            raise ServiceValidationError(f"Unknown label. Valid: {', '.join(room.labels)}")
+        if not manager.teach(room_id, label):
             raise ServiceValidationError("Not enough sensor history yet to learn from")
 
     async def handle_confirm(call: ServiceCall) -> None:
-        manager, _ = resolve(call)
-        if not manager.confirm():
+        manager, room_id, _ = resolve_target(call)
+        if not manager.confirm(room_id):
             raise ServiceValidationError("There is no suggestion to confirm yet")
 
     async def handle_reset_learning(call: ServiceCall) -> None:
-        manager, _ = resolve(call)
-        manager.reset_learning()
+        manager, room_id, appliance_id = resolve_target(call)
+        manager.reset_learning(None if appliance_id is None and room_id == MAIN_ROOM else room_id)
 
     def resolve_simulated(call: ServiceCall) -> tuple[HvacSimulatorManager, str]:
         manager, appliance_id = resolve(call)
@@ -123,7 +134,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         fans = call.data.get(ATTR_FANS)
         fans_on = call.data.get(ATTR_FANS_ON)
         if fans is not None or fans_on is not None:
-            if appliance_id not in manager.fan_groups:
+            if appliance_id not in manager.room_of(appliance_id).fan_groups:
                 raise ServiceValidationError("fans / fans_on only apply to extractor fan groups")
             if not manager.calibrate_fans(appliance_id, fans, fans_on):
                 raise ServiceValidationError(
@@ -143,8 +154,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             )
 
     async def handle_calibrate_occupancy(call: ServiceCall) -> None:
-        manager, _ = resolve(call)
-        if not manager.calibrate_occupancy(call.data[ATTR_PEOPLE], call.data.get(ATTR_ACTIVITY)):
+        manager, room_id, _ = resolve_target(call)
+        if not manager.calibrate_occupancy(room_id, call.data[ATTR_PEOPLE], call.data.get(ATTR_ACTIVITY)):
             raise ServiceValidationError(
                 "Needs a CO2 sensor and a few minutes of CO2 history before calibrating"
             )
@@ -214,6 +225,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HvacSimConfigEntry) -> b
     )
     _remove_stale_appliance_devices(hass, entry, manager)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _assign_device_areas(hass, entry, manager)
     await manager.async_start()
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
@@ -236,8 +248,32 @@ def _remove_stale_appliance_devices(
 ) -> None:
     """Delete devices for appliances that were removed in the options flow."""
     registry = dr.async_get(hass)
-    wanted = {entry.entry_id} | {appliance_identifier(entry.entry_id, a.id) for a in manager.appliances}
+    wanted = (
+        {entry.entry_id}
+        | {appliance_identifier(entry.entry_id, a.id) for a in manager.appliances}
+        | {room_identifier(entry.entry_id, rid) for rid in manager.rooms}
+    )
     for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
         idents = {i for d, i in device.identifiers if d == DOMAIN}
         if idents and not idents & wanted:
             registry.async_remove_device(device.id)
+
+
+def _assign_device_areas(hass: HomeAssistant, entry: ConfigEntry, manager: HvacSimulatorManager) -> None:
+    """Put room and appliance devices in their Home Assistant areas (never overriding a user's choice)."""
+    registry = dr.async_get(hass)
+    targets: dict[str, str | None] = {
+        room_identifier(entry.entry_id, rid): r.config.area_id for rid, r in manager.rooms.items()
+    }
+    by_id = {rc.id: rc for rc in manager.room_configs}
+    for appliance in manager.appliances:
+        area = appliance.room
+        if area in by_id:  # an extra room's id, not an area id
+            area = by_id[area].area_id
+        targets[appliance_identifier(entry.entry_id, appliance.id)] = area
+    for ident, area_id in targets.items():
+        if not area_id:
+            continue
+        device = registry.async_get_device(identifiers={(DOMAIN, ident)})
+        if device is not None and device.area_id is None:
+            registry.async_update_device(device.id, area_id=area_id)

@@ -14,6 +14,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import selector
 
 from .appliances import (
@@ -34,6 +35,7 @@ from .appliances import (
     modes_for_functions,
 )
 from .const import (
+    CONF_ACTIVE_ABOVE_W,
     CONF_ACTIVE_RATE,
     CONF_AIR_QUALITY,
     CONF_AIRFLOW,
@@ -55,7 +57,14 @@ from .const import (
     CONF_INDOOR_HUMIDITY,
     CONF_INDOOR_TEMP,
     CONF_INVERTER,
+    CONF_KIND,
     CONF_LEARN_FROM_MANUAL,
+    CONF_MAIN_AIR_GAP_NOTES,
+    CONF_MAIN_AIR_GAPS,
+    CONF_MAIN_AREA,
+    CONF_MAIN_FLOWS_INTO,
+    CONF_MAIN_TYPE,
+    CONF_MANUAL_TIMEOUT,
     CONF_MAX_IDLE_MINUTES,
     CONF_MAX_LEARNED_WEIGHT,
     CONF_MAX_SETPOINT,
@@ -65,16 +74,23 @@ from .const import (
     CONF_MODES,
     CONF_NOTIFY_RATING,
     CONF_NOTIFY_SERVICE,
+    CONF_OFF_DETECT,
     CONF_ON_THRESHOLD_W,
     CONF_OPENINGS,
     CONF_OUTDOOR_HUMIDITY,
     CONF_OUTDOOR_TEMP,
     CONF_POWER_ENTITY,
+    CONF_ROOM,
+    CONF_ROOMS,
     CONF_SLEEP_END,
     CONF_SLEEP_START,
+    CONF_SOLAR_MARGIN,
     CONF_SOLAR_THRESHOLD,
     CONF_STABLE_RATE,
     CONF_STANDBY_W,
+    CONF_UPDATE_INTERVAL,
+    CONF_UPDATE_MODE,
+    CONF_USE_VIRTUAL_OPENINGS,
     CONF_VOLUME,
     CONF_WINDOW_MINUTES,
     DEFAULT_ACTIVE_RATE,
@@ -89,14 +105,20 @@ from .const import (
     DEFAULT_NOTIFY_RATING,
     DEFAULT_SLEEP_END,
     DEFAULT_SLEEP_START,
+    DEFAULT_SOLAR_MARGIN,
     DEFAULT_SOLAR_THRESHOLD,
     DEFAULT_STABLE_RATE,
+    DEFAULT_UPDATE_INTERVAL,
     DEFAULT_VOLUME,
     DEFAULT_WINDOW_MINUTES,
     DOMAIN,
     SENSOR_KEYS,
+    UPDATE_MODE_INTERVAL,
+    UPDATE_MODE_ON_CHANGE,
 )
 from .effectiveness import RATING_NAMES, RATINGS
+from .plugs import KIND_GENERAL, KIND_NAMES, KINDS
+from .room import AIR_GAPS, MAIN_ROOM, ROOM_TYPES
 
 _OPTIONAL_ENTITY_KEYS = (
     CONF_INDOOR_HUMIDITY,
@@ -155,6 +177,89 @@ def _sensors_schema(current: dict[str, Any], with_name: bool) -> vol.Schema:
             vol.Required(
                 CONF_SOLAR_THRESHOLD, default=current.get(CONF_SOLAR_THRESHOLD, DEFAULT_SOLAR_THRESHOLD)
             ): _num(-10, 45, 0.5, "°C"),
+            vol.Optional(CONF_MAIN_AREA, description=suggested(CONF_MAIN_AREA)): selector.AreaSelector(),
+            vol.Required(
+                CONF_MAIN_TYPE, default=current.get(CONF_MAIN_TYPE, "living")
+            ): _room_type_selector(),
+            vol.Required(
+                CONF_MAIN_AIR_GAPS, default=current.get(CONF_MAIN_AIR_GAPS, "none")
+            ): _air_gap_selector(),
+            vol.Optional(CONF_MAIN_AIR_GAP_NOTES, description=suggested(CONF_MAIN_AIR_GAP_NOTES)): str,
+            vol.Required(
+                CONF_USE_VIRTUAL_OPENINGS, default=current.get(CONF_USE_VIRTUAL_OPENINGS, True)
+            ): selector.BooleanSelector(),
+        }
+    )
+    return vol.Schema(fields)
+
+
+def _room_type_selector() -> selector.SelectSelector:
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=[selector.SelectOptionDict(value=t, label=ROOM_TYPE_NAMES[t]) for t in ROOM_TYPES],
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _air_gap_selector() -> selector.SelectSelector:
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=[selector.SelectOptionDict(value=g, label=AIR_GAP_NAMES[g]) for g in AIR_GAPS],
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+ROOM_TYPE_NAMES = {
+    "living": "Living / open plan",
+    "bedroom": "Bedroom",
+    "bathroom": "Bathroom (enables shower detection)",
+    "laundry": "Laundry",
+    "kitchen": "Kitchen",
+    "hallway": "Hallway",
+    "office": "Office / study",
+    "other": "Other",
+}
+AIR_GAP_NAMES = {
+    "none": "None known (tight)",
+    "small": "Small gaps (door undercut, old seals)",
+    "large": "Large gaps (vents, gaps around windows, open chimney)",
+}
+
+
+def _room_schema(current: dict[str, Any], new: bool) -> vol.Schema:
+    def suggested(key: str) -> dict[str, Any]:
+        value = current.get(key)
+        return {"suggested_value": value} if value not in (None, "", []) else {}
+
+    fields: dict[Any, Any] = {}
+    if new:
+        fields[vol.Required("area_id")] = selector.AreaSelector()
+    fields.update(
+        {
+            vol.Required("type", default=current.get("type", "other")): _room_type_selector(),
+            vol.Optional("temperature", description=suggested("temperature")): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+            ),
+            vol.Optional("humidity", description=suggested("humidity")): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="humidity")
+            ),
+            vol.Optional("co2", description=suggested("co2")): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="carbon_dioxide")
+            ),
+            vol.Optional("air_quality", description=suggested("air_quality")): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            ),
+            vol.Optional("openings", default=current.get("openings") or []): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+            ),
+            vol.Required("volume_m3", default=current.get("volume_m3", 30)): _num(1, 5000, 1, "m³"),
+            vol.Required("air_gaps", default=current.get("air_gaps", "none")): _air_gap_selector(),
+            vol.Optional("air_gap_notes", description=suggested("air_gap_notes")): str,
+            vol.Required(
+                "use_virtual_openings", default=current.get("use_virtual_openings", True)
+            ): selector.BooleanSelector(),
         }
     )
     return vol.Schema(fields)
@@ -231,6 +336,25 @@ def _tuning_schema(current: dict[str, Any]) -> vol.Schema:
                 if current.get(CONF_NOTIFY_SERVICE)
                 else {},
             ): str,
+            vol.Required(CONF_SOLAR_MARGIN, default=d(CONF_SOLAR_MARGIN, DEFAULT_SOLAR_MARGIN)): _num(
+                0, 15, 0.5, "°C"
+            ),
+            vol.Required(
+                CONF_UPDATE_MODE, default=d(CONF_UPDATE_MODE, UPDATE_MODE_INTERVAL)
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value=UPDATE_MODE_INTERVAL, label="On a fixed interval"),
+                        selector.SelectOptionDict(
+                            value=UPDATE_MODE_ON_CHANGE, label="Every time a sensor updates"
+                        ),
+                    ],
+                    mode=selector.SelectSelectorMode.LIST,
+                )
+            ),
+            vol.Required(
+                CONF_UPDATE_INTERVAL, default=d(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+            ): _num(5, 600, 5, "s"),
         }
     )
 
@@ -239,6 +363,7 @@ def _appliance_type_schema(current: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
             vol.Required(CONF_APPLIANCE_NAME, default=current.get(CONF_APPLIANCE_NAME, "")): str,
+            vol.Optional(CONF_ROOM, description=_suggest(current, CONF_ROOM)): selector.AreaSelector(),
             vol.Required(
                 CONF_APPLIANCE_TYPE, default=current.get(CONF_APPLIANCE_TYPE, TYPE_HEATER)
             ): selector.SelectSelector(
@@ -275,11 +400,22 @@ def _functions_schema(current: dict[str, Any]) -> vol.Schema:
 def _appliance_details_schema(atype: str, current: dict[str, Any]) -> vol.Schema:
     fields: dict[Any, Any] = {}
     if atype == TYPE_HEAT_SOURCE:
+        fields[vol.Required(CONF_KIND, default=current.get(CONF_KIND, KIND_GENERAL))] = (
+            selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[selector.SelectOptionDict(value=k, label=KIND_NAMES[k]) for k in KINDS],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+        )
         fields[vol.Required(CONF_POWER_ENTITY, description=_suggest(current, CONF_POWER_ENTITY))] = (
             selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="power"))
         )
-        fields[vol.Required(CONF_ON_THRESHOLD_W, default=current.get(CONF_ON_THRESHOLD_W, 10))] = _num(
-            0, 5000, 1, "W"
+        fields[vol.Required(CONF_ON_THRESHOLD_W, default=current.get(CONF_ON_THRESHOLD_W, 1))] = _num(
+            0, 5000, 0.5, "W"
+        )
+        fields[vol.Optional(CONF_ACTIVE_ABOVE_W, description=_suggest(current, CONF_ACTIVE_ABOVE_W))] = _num(
+            0, 10000, 1, "W"
         )
         return vol.Schema(fields)
 
@@ -313,10 +449,28 @@ def _appliance_details_schema(atype: str, current: dict[str, Any]) -> vol.Schema
         fields[vol.Required(CONF_IDLE_FAN_W, default=current.get(CONF_IDLE_FAN_W, fan_default))] = _num(
             0, 500, 1, "W"
         )
+        fields[vol.Required(CONF_MANUAL_TIMEOUT, default=current.get(CONF_MANUAL_TIMEOUT, 0))] = _num(
+            0, 1440, 5, "min"
+        )
+        fields[vol.Required(CONF_OFF_DETECT, default=current.get(CONF_OFF_DETECT, 45))] = _num(
+            0, 720, 5, "min"
+        )
     fields[vol.Required(CONF_CALCULATE_ENERGY, default=current.get(CONF_CALCULATE_ENERGY, True))] = (
         selector.BooleanSelector()
     )
     return vol.Schema(fields)
+
+
+def _clean_room(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Room fields from a form, with cleared optional sensors stored as None."""
+    out = {
+        k: user_input.get(k)
+        for k in ("type", "temperature", "humidity", "co2", "air_quality", "air_gaps", "air_gap_notes")
+    }
+    out["openings"] = user_input.get("openings") or []
+    out["volume_m3"] = float(user_input.get("volume_m3") or 30)
+    out["use_virtual_openings"] = bool(user_input.get("use_virtual_openings", True))
+    return out
 
 
 def _suggest(current: dict[str, Any], key: str) -> dict[str, Any]:
@@ -361,6 +515,7 @@ class _ApplianceSteps:
                 CONF_APPLIANCE_ID: uuid.uuid4().hex[:8],
                 CONF_APPLIANCE_NAME: name,
                 CONF_APPLIANCE_TYPE: user_input[CONF_APPLIANCE_TYPE],
+                CONF_ROOM: user_input.get(CONF_ROOM),
             }
             return await self._next_after_type()
         return self.async_show_form(step_id="add_appliance", data_schema=_appliance_type_schema({}))  # type: ignore[attr-defined]
@@ -460,12 +615,15 @@ class HvacSimulatorsOptionsFlow(_ApplianceSteps, OptionsFlow):
 
     def __init__(self) -> None:
         self._appliances = []
+        self._rooms: list[dict[str, Any]] = []
         self._draft = {}
+        self._room_draft: dict[str, Any] = {}
         self._loaded = False
 
     def _load(self) -> None:
         if not self._loaded:
             self._appliances = [dict(a) for a in self.config_entry.options.get(CONF_APPLIANCES, [])]
+            self._rooms = [dict(r) for r in self.config_entry.options.get(CONF_ROOMS, [])]
             self._loaded = True
 
     @property
@@ -474,20 +632,113 @@ class HvacSimulatorsOptionsFlow(_ApplianceSteps, OptionsFlow):
 
     def _finish(self, updates: dict[str, Any]) -> ConfigFlowResult:
         return self.async_create_entry(
-            data={**self.config_entry.options, CONF_APPLIANCES: self._appliances, **updates}
+            data={
+                **self.config_entry.options,
+                CONF_APPLIANCES: self._appliances,
+                CONF_ROOMS: self._rooms,
+                **updates,
+            }
         )
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._load()
-        options = ["sensors", "tuning", "add_appliance"]
+        options = ["sensors", "tuning", "add_room"]
+        if self._rooms:
+            options += ["edit_room", "remove_room"]
+        options += ["room_links", "add_appliance"]
         if self._appliances:
             options += ["edit_appliance", "remove_appliance"]
         return self.async_show_menu(
             step_id="init",
             menu_options=options,
             description_placeholders={
-                "appliances": ", ".join(a[CONF_APPLIANCE_NAME] for a in self._appliances) or "none yet"
+                "appliances": ", ".join(a[CONF_APPLIANCE_NAME] for a in self._appliances) or "none yet",
+                "rooms": ", ".join(r["name"] for r in self._rooms) or "none yet",
             },
+        )
+
+    # --- rooms ---------------------------------------------------------------
+
+    def _area_name(self, area_id: str) -> str:
+        area = ar.async_get(self.hass).async_get_area(area_id)
+        return area.name if area else area_id
+
+    def _room_choice(self) -> vol.Schema:
+        return vol.Schema(
+            {
+                vol.Required("id"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value=r["id"], label=r["name"]) for r in self._rooms
+                        ]
+                    )
+                )
+            }
+        )
+
+    async def async_step_add_room(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            area_id = user_input["area_id"]
+            if any(r["id"] == area_id for r in self._rooms) or area_id == self._current.get(CONF_MAIN_AREA):
+                errors["area_id"] = "room_exists"
+            else:
+                room = _clean_room(user_input)
+                room.update(
+                    {"id": area_id, "area_id": area_id, "name": self._area_name(area_id), "flows_into": []}
+                )
+                self._rooms.append(room)
+                return self._finish({})
+        return self.async_show_form(
+            step_id="add_room", data_schema=_room_schema(user_input or {}, new=True), errors=errors
+        )
+
+    async def async_step_edit_room(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            self._room_draft = next(dict(r) for r in self._rooms if r["id"] == user_input["id"])
+            return await self.async_step_room_details()
+        return self.async_show_form(step_id="edit_room", data_schema=self._room_choice())
+
+    async def async_step_room_details(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            room = {**self._room_draft, **_clean_room(user_input)}
+            self._rooms = [room if r["id"] == room["id"] else r for r in self._rooms]
+            return self._finish({})
+        return self.async_show_form(
+            step_id="room_details",
+            data_schema=_room_schema(self._room_draft, new=False),
+            description_placeholders={"name": self._room_draft.get("name", "")},
+        )
+
+    async def async_step_remove_room(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            gone = user_input["id"]
+            self._rooms = [r for r in self._rooms if r["id"] != gone]
+            for room in self._rooms:
+                room["flows_into"] = [x for x in room.get("flows_into", []) if x != gone]
+            return self._finish({})
+        return self.async_show_form(step_id="remove_room", data_schema=self._room_choice())
+
+    async def async_step_room_links(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Which rooms flow into each other (open doorways, hallways, gaps): they form zones."""
+        everyone = [(MAIN_ROOM, self.config_entry.title)] + [(r["id"], r["name"]) for r in self._rooms]
+        if user_input is not None:
+            main_links = user_input.get(f"links_{MAIN_ROOM}", [])
+            for room in self._rooms:
+                room["flows_into"] = user_input.get(f"links_{room['id']}", [])
+            return self._finish({CONF_MAIN_FLOWS_INTO: main_links})
+        current = {MAIN_ROOM: self._current.get(CONF_MAIN_FLOWS_INTO) or []}
+        current.update({r["id"]: r.get("flows_into", []) for r in self._rooms})
+        fields: dict[Any, Any] = {}
+        for rid, name in everyone:
+            others = [selector.SelectOptionDict(value=o, label=n) for o, n in everyone if o != rid]
+            fields[
+                vol.Optional(f"links_{rid}", default=current.get(rid, []), description={"suffix": name})
+            ] = selector.SelectSelector(selector.SelectSelectorConfig(options=others, multiple=True))
+        return self.async_show_form(
+            step_id="room_links",
+            data_schema=vol.Schema(fields),
+            description_placeholders={"rooms": ", ".join(n for _, n in everyone)},
         )
 
     async def async_step_sensors(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -538,11 +789,17 @@ class HvacSimulatorsOptionsFlow(_ApplianceSteps, OptionsFlow):
             self._draft[CONF_APPLIANCE_NAME] = (
                 user_input[CONF_APPLIANCE_NAME].strip() or self._draft[CONF_APPLIANCE_NAME]
             )
+            self._draft[CONF_ROOM] = user_input.get(CONF_ROOM)
             return await self._next_after_type()
         return self.async_show_form(
             step_id="rename_appliance",
             data_schema=vol.Schema(
-                {vol.Required(CONF_APPLIANCE_NAME, default=self._draft[CONF_APPLIANCE_NAME]): str}
+                {
+                    vol.Required(CONF_APPLIANCE_NAME, default=self._draft[CONF_APPLIANCE_NAME]): str,
+                    vol.Optional(
+                        CONF_ROOM, description=_suggest(self._draft, CONF_ROOM)
+                    ): selector.AreaSelector(),
+                }
             ),
         )
 

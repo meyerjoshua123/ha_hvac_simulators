@@ -61,6 +61,9 @@ class ApplianceSimulator:
         # Room sensor minus the unit's own thermostat, learned while it cycles
         # (e.g. -1.0 when the room reads 17 °C with the unit holding 18 °C).
         self.thermostat_offset: float | None = None
+        self.manual_since: float | None = None
+        self.last_event: str | None = None
+        self._wrong_side_since: float | None = None
         # Fan groups: how many fans are running (estimated, or set manually).
         self.units_on = 0
         self.units_on_members: list[str] = []
@@ -84,6 +87,7 @@ class ApplianceSimulator:
         return {
             "manual_mode": self.manual_mode,
             "manual_setpoint": self.manual_setpoint,
+            "manual_since": self.manual_since,
             "manual_units": self.manual_units,
             "thermostat_offset": self.thermostat_offset,
             "energy_kwh": self.energy_kwh,
@@ -100,6 +104,7 @@ class ApplianceSimulator:
         valid = (MANUAL_AUTO, MODE_OFF, *self.appliance.modes)
         self.manual_mode = mode if mode in valid else MANUAL_AUTO
         self.manual_setpoint = data.get("manual_setpoint")
+        self.manual_since = data.get("manual_since")
         self.manual_units = data.get("manual_units")
         self.thermostat_offset = data.get("thermostat_offset")
         self.energy_kwh = float(data.get("energy_kwh", 0.0))
@@ -112,6 +117,31 @@ class ApplianceSimulator:
         for mode, tracker_data in (data.get("effectiveness") or {}).items():
             if mode in self.effectiveness:
                 self.effectiveness[mode].load(tracker_data)
+
+    def set_manual(self, now: float, mode: str | None = None, setpoint: float | None = None) -> None:
+        """Apply a manual mode and/or setpoint; restarts the timeout clock."""
+        if mode is not None:
+            self.manual_mode = mode
+        if setpoint is not None:
+            self.manual_setpoint = self.appliance.clamp_setpoint(setpoint)
+        self.manual_since = (
+            now if self.manual_mode != MANUAL_AUTO or self.manual_setpoint is not None else None
+        )
+        self._wrong_side_since = None
+
+    @property
+    def manual_expires_at(self) -> float | None:
+        if self.manual_since is None or self.appliance.manual_timeout_min <= 0:
+            return None
+        return self.manual_since + self.appliance.manual_timeout_min * 60
+
+    def _revert_to_auto(self, event: str) -> None:
+        self.manual_mode = MANUAL_AUTO
+        self.manual_setpoint = None
+        self.manual_units = None
+        self.manual_since = None
+        self._wrong_side_since = None
+        self.last_event = event
 
     def reset_learning(self) -> None:
         self.turn_points = {}
@@ -275,12 +305,17 @@ class ApplianceSimulator:
         self._integrate(now)
         prev_status = self.status
         cycling = self._cycling(features)
+        expires = self.manual_expires_at
+        if expires is not None and now >= expires:
+            self._revert_to_auto("manual_timeout")
         if self.manual_mode != MANUAL_AUTO:
             self._update_manual(features, hold_band)
         else:
             self._update_auto(
                 now, features, label, confidence, min_confidence, hold_band, other_active, max_idle_s
             )
+        if self.manual_mode in (MODE_HEAT, MODE_COOL) and not cycling:
+            self._detect_switched_off(now, features)
         if cycling and self.mode in (MODE_COOL, MODE_DRY) and self.status != STATUS_OFF:
             # Evidence beats assumption: follow the compressor seen in humidity.
             self.status = STATUS_ACTIVE if features.compressor_on else STATUS_IDLE  # type: ignore[union-attr]
@@ -314,6 +349,26 @@ class ApplianceSimulator:
                 units_on=self.units_on,
                 satisfied=self.idle_reason in (IDLE_SATISFIED, IDLE_CYCLING),
             )
+
+    def _detect_switched_off(self, now: float, f: Features | None) -> None:
+        """Manual heat/cool but the room drifts the wrong way past the setpoint: it was turned off."""
+        sp = self.setpoint
+        limit = self.appliance.off_detect_min * 60
+        if f is None or sp is None or limit <= 0:
+            return
+        sp += self.thermostat_offset or 0.0
+        band = 1.0
+        wrong = (self.mode == MODE_COOL and f.t_in > sp + band and f.r_t >= 0) or (
+            self.mode == MODE_HEAT and f.t_in < sp - band and f.r_t <= 0
+        )
+        if not wrong:
+            self._wrong_side_since = None
+            return
+        if self._wrong_side_since is None:
+            self._wrong_side_since = now
+        elif now - self._wrong_side_since >= limit:
+            self._revert_to_auto("switched_off_detected")
+            self.status, self.mode = STATUS_OFF, MODE_OFF
 
     @staticmethod
     def _cycling(f: Features | None) -> bool:

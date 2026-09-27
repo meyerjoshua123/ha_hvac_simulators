@@ -92,6 +92,11 @@ class Sample:
     # Measured power (W) of each heat source (fridge, dryer...) by id.
     gains: dict[str, float] = field(default_factory=dict)
 
+    @property
+    def ah_in(self) -> float | None:
+        """Indoor absolute humidity (g/m³)."""
+        return absolute_humidity(self.t_in, self.rh_in)
+
 
 @dataclass
 class Tuning:
@@ -102,6 +107,9 @@ class Tuning:
     dehumid_rh_rate: float = -3.0  # %RH/h drop that implies dehumidifying
     aq_improve_rel: float = -0.05  # relative AQ change per hour meaning "improving"
     solar_threshold: float = 22.0  # outdoor °C above which warming is from the sun
+    # Indoor this many °C above outdoor while warming with the sun up points to
+    # solar gain: the warming can't be heat leaking in from a cooler outside.
+    solar_margin: float = 2.0
     k_closed: float = 0.05  # passive exchange rate (1/h) with openings closed
     k_open: float = 0.3  # passive exchange rate (1/h) with an opening open
     aq_lower_is_better: bool = True
@@ -131,6 +139,12 @@ class Features:
     # r_t / r_h above are *compensated*: the learned effect of heat sources is removed.
     gain_t: float = 0.0  # °C/h attributed to heat sources
     gain_h: float = 0.0  # %RH/h attributed to heat sources
+    # Absolute humidity (g/m³): indoor, outdoor, and indoor rate of change.
+    ah_in: float | None = None
+    ah_out: float | None = None
+    r_ah: float | None = None
+    # True when door/window state is known (real sensors, or a confident estimate).
+    openings_known: bool = True
     # Compressor cycling seen in humidity (see cycling.py); 0 when none.
     cycle_strength: float = 0.0
     cycle_period_min: float | None = None
@@ -162,6 +176,10 @@ class Features:
             "ach_obs": None if self.ach_obs is None else round(self.ach_obs, 3),
             "gain_t": round(self.gain_t, 3),
             "gain_h": round(self.gain_h, 3),
+            "ah_in": None if self.ah_in is None else round(self.ah_in, 2),
+            "ah_out": None if self.ah_out is None else round(self.ah_out, 2),
+            "r_ah": None if self.r_ah is None else round(self.r_ah, 3),
+            "openings_known": self.openings_known,
             "cycle_strength": self.cycle_strength,
             "cycle_period_min": self.cycle_period_min,
             "compressor_on": self.compressor_on,
@@ -311,6 +329,8 @@ def compute_features(
     hour: int,
     gains: tuple[float, float] = (0.0, 0.0),
     cycle: dict | None = None,
+    openings_known: bool = True,
+    is_open: bool | None = None,
 ) -> Features | None:
     """Turn the sample buffer into a feature vector. None when there is not enough data.
 
@@ -342,7 +362,12 @@ def compute_features(
         # Exponential decay towards outdoor air: dC/dt = -ach * (C - C_out).
         ach_obs = max(0.0, -r_co2 / (co2 - tuning.co2_outdoor))
     latest = buffer.samples[-1] if buffer.samples else None
-    is_open = bool(latest.is_open) if latest else False
+    if is_open is None:
+        is_open = bool(latest.is_open) if latest else False
+    rh_out = buffer.mean("rh_out", window_s, now)
+    ah_in = absolute_humidity(t_in, buffer.latest("rh_in"))
+    ah_out = absolute_humidity(t_out, rh_out)
+    r_ah = buffer.slope_per_hour("ah_in", window_s, now)
     expected = expected_passive_rate(t_in, t_out, is_open, tuning)
     return Features(
         r_t=r_t,
@@ -361,6 +386,10 @@ def compute_features(
         ach_obs=ach_obs,
         gain_t=gain_t,
         gain_h=gain_h if r_h is not None else 0.0,
+        ah_in=ah_in,
+        ah_out=ah_out,
+        r_ah=r_ah,
+        openings_known=openings_known,
         cycle_strength=float((cycle or {}).get("strength") or 0.0),
         cycle_period_min=(cycle or {}).get("period_min"),
         compressor_on=(cycle or {}).get("compressor_on"),
@@ -383,12 +412,19 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
     reasons: dict[str, list[str]] = {c: [] for c in ALL_CAUSES}
 
     trend = f"Indoor temp {rt:+.2f} °C/h (passive would explain {f.expected_passive:+.2f})"
-    solar_ok = (
-        d_out is not None
-        and f.t_out is not None
-        and f.t_out >= tuning.solar_threshold
-        and f.sun_up is not False
-    )
+    # How likely warming is from the sun: sun not known to be down, and either
+    # warm outside (at/above the solar threshold) or indoor already well above
+    # outdoor so the warming can't be leaking in from outside.
+    solar_likelihood = 0.0
+    # Sun state unknown (no sun entity): treat night hours as sun down.
+    sun_up = f.sun_up if f.sun_up is not None else (None if 7 <= f.hour < 19 else False)
+    if f.t_out is not None and sun_up is not False:
+        by_outdoor = ramp(f.t_out, tuning.solar_threshold - 3.0, tuning.solar_threshold)
+        # Indoor well above outdoor counts on mild days; on cold days a heater
+        # is the likelier reason for warming, so this evidence fades out.
+        mild = ramp(f.t_out, tuning.solar_threshold - 10.0, tuning.solar_threshold - 4.0)
+        by_margin = ramp(f.t_in - f.t_out, 0.0, tuning.solar_margin) * mild
+        solar_likelihood = max(by_outdoor, by_margin) * (1.0 if sun_up else 0.7)
     aq_improving = 0.0
     if f.r_aq is not None:
         aq_improving = ramp(f.r_aq, tuning.aq_improve_rel * 0.5, tuning.aq_improve_rel * 1.5)
@@ -426,8 +462,8 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
             heat *= 0.7
             if heat > 0:
                 reasons[CAUSE_HEATING].append("Outside is warmer, so some warming is passive")
-        if solar_ok and closed:
-            heat *= 0.5
+        if closed:
+            heat *= 1.0 - 0.5 * solar_likelihood
         if f.is_open and d_out is not None and d_out > 0:
             heat *= 0.5
         scores[CAUSE_HEATING] = heat
@@ -493,7 +529,19 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
     # Ventilation vs filtering vs airing out.
     temp_explained = ramp(abs(resid), at * 1.5, at * 0.5)
     if co2_flushing is not None:
-        if closed:
+        if closed and not f.openings_known:
+            # No door/window information: a fan and an open window look the same.
+            both = co2_flushing * temp_explained
+            scores[CAUSE_VENTILATION] = 0.5 * both
+            scores[CAUSE_WINDOW_AIRING] = 0.5 * both
+            if both > 0.2:
+                note = (
+                    f"CO2 clearing at {f.ach_obs:.1f} air changes/h, but without door/window "
+                    "sensors a fan can't be told from an open window"
+                )
+                reasons[CAUSE_VENTILATION].append(note)
+                reasons[CAUSE_WINDOW_AIRING].append(note)
+        elif closed:
             vent = co2_flushing * temp_explained
             scores[CAUSE_VENTILATION] = vent
             if vent > 0.2:
@@ -545,13 +593,17 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
     if closed and d_out is not None:
         if rt > st * 0.5:
             warming = ramp(rt, st * 0.5, st * 1.5)
-            if solar_ok:
-                scores[CAUSE_SOLAR_GAIN] = warming * (1.0 if f.sun_up else 0.7)
-                reasons[CAUSE_SOLAR_GAIN].append(
-                    f"Warming while outside is {f.t_out:.1f} °C (at or above solar threshold {tuning.solar_threshold:.1f} °C)"
-                )
-            elif d_out > 0.5:
-                scores[CAUSE_HEAT_LEAK_IN] = warming * explained
+            if solar_likelihood > 0:
+                # Sun through glass is moderate; very fast warming is more likely a heater.
+                plausible = ramp(resid, at * 4.0, at * 1.5)
+                scores[CAUSE_SOLAR_GAIN] = warming * solar_likelihood * max(plausible, 0.3)
+                if scores[CAUSE_SOLAR_GAIN] > 0.2:
+                    reasons[CAUSE_SOLAR_GAIN].append(
+                        f"Warming with the sun up; outside {f.t_out:.1f} °C "
+                        f"(solar threshold {tuning.solar_threshold:.1f} °C), indoor {-d_out:+.1f} °C vs outside"
+                    )
+            if d_out > 0.5:
+                scores[CAUSE_HEAT_LEAK_IN] = warming * explained * (1.0 - solar_likelihood)
                 reasons[CAUSE_HEAT_LEAK_IN].append(
                     f"Outside is {d_out:.1f} °C warmer; warming matches passive leakage"
                 )

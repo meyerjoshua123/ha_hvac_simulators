@@ -9,10 +9,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import HvacSimConfigEntry
 from .appliances import Appliance
-from .const import CONF_CO2
 from .entity import ApplianceEntity, HvacSimEntity
 from .manager import ACTIVITY_AUTO, HvacSimulatorManager
 from .occupancy import ACTIVITIES
+from .room import Room
 from .simulator import MANUAL_AUTO
 
 OPTION_NONE = "Not taught"
@@ -22,8 +22,10 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: HvacSimConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     manager = entry.runtime_data
-    entities: list[SelectEntity] = [TeachSelect(manager)]
-    if manager.config.get(CONF_CO2):
+    entities: list[SelectEntity] = [
+        TeachSelect(manager, r) for r in manager.rooms.values() if r.config.sensed
+    ]
+    if any(r.config.co2 for r in manager.rooms.values()):
         entities.append(ActivitySelect(manager))
     entities.extend(ManualModeSelect(manager, a) for a in manager.simulated)
     async_add_entities(entities)
@@ -35,22 +37,22 @@ class TeachSelect(HvacSimEntity, SelectEntity):
     _attr_name = "Actual mode (teach)"
     _attr_icon = "mdi:school-outline"
 
-    def __init__(self, manager: HvacSimulatorManager) -> None:
-        super().__init__(manager, "teach")
+    def __init__(self, manager: HvacSimulatorManager, room: Room) -> None:
+        super().__init__(manager, "teach", room)
         self._refresh()
 
     @callback
     def _refresh(self) -> None:
-        names = [self.manager.label_name(label) for label in self.manager.labels]
+        names = [self.room.label_name(label) for label in self.room.labels]
         self._attr_options = [OPTION_NONE, *names]
-        last = self.manager.label_name(self.manager.last_taught)
+        last = self.room.label_name(self.room.last_taught)
         self._attr_current_option = last if last in names else OPTION_NONE
 
     async def async_select_option(self, option: str) -> None:
         if option == OPTION_NONE:
             return
-        label = self.manager.label_from_name(option)
-        if label is None or not self.manager.teach(label):
+        label = self.room.label_from_name(option)
+        if label is None or not self.manager.teach(self.room.id, label):
             raise HomeAssistantError("Not enough sensor history yet to learn from")
 
 

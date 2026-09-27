@@ -156,14 +156,23 @@ class Appliance:
     hold_factor: float = 0.4
     # Power while the compressor/element is off but the unit is on (fan only).
     idle_fan_w: float = 30.0
+    # Manual mode/setpoint reverts to auto after this long (0 = never).
+    manual_timeout_min: float = 0.0
+    # In manual heat/cool, drifting the wrong way past the setpoint for this
+    # long means the unit was switched off (0 = never assume).
+    off_detect_min: float = 45.0
     calculate_energy: bool = True
     # Extractor fan groups
     count: int = 1
     members: list[str] = field(default_factory=list)
     airflow_m3h: float = DEFAULT_FAN_AIRFLOW_M3H
-    # Heat sources
+    # Heat sources (plugged-in appliances)
     power_entity: str | None = None
     on_threshold_w: float = 10.0
+    kind: str = "general"
+    active_above_w: float | None = None
+    # Home Assistant area the appliance is in (None = the whole space).
+    room: str | None = None
 
     @classmethod
     def from_config(cls, data: dict[str, Any]) -> Appliance:
@@ -198,12 +207,17 @@ class Appliance:
             inverter=bool(data.get("inverter", True)),
             hold_factor=float(data.get("hold_factor") or 0.4),
             idle_fan_w=_idle_fan_default(atype, data),
+            manual_timeout_min=float(data.get("manual_timeout_min") or 0.0),
+            off_detect_min=float(data.get("off_detect_min", 45.0) or 0.0),
             calculate_energy=bool(data.get("calculate_energy", True)) and atype != TYPE_HEAT_SOURCE,
             count=count if atype == TYPE_EXTRACTOR_FAN else 1,
             members=members if atype == TYPE_EXTRACTOR_FAN else [],
             airflow_m3h=float(data.get("airflow_m3h") or DEFAULT_FAN_AIRFLOW_M3H),
             power_entity=data.get("power_entity") or None,
             on_threshold_w=float(data.get("on_threshold_w") or 10.0),
+            kind=str(data.get("kind") or "general"),
+            active_above_w=_opt_float(data.get("active_above_w")),
+            room=data.get("room") or None,
         )
 
     @property

@@ -53,6 +53,8 @@ class OccupancyModel:
     def __init__(self, volume_m3: float = 100.0, co2_outdoor: float = 420.0) -> None:
         self.volume_m3 = max(volume_m3, 5.0)
         self.co2_outdoor = co2_outdoor
+        # Natural leakage before any empty-home calibration (raised for rooms with known air gaps).
+        self.default_closed_ach = DEFAULT_ACH[VENT_CLOSED]
         self.calibrations: list[dict[str, Any]] = []
 
     # --- persistence -----------------------------------------------------
@@ -113,7 +115,9 @@ class OccupancyModel:
         observed = self._observed_ach(vent_state)
         if observed is not None:
             return observed
-        return DEFAULT_ACH.get(vent_state, DEFAULT_ACH[VENT_CLOSED])
+        if vent_state == VENT_CLOSED:
+            return self.default_closed_ach
+        return DEFAULT_ACH.get(vent_state, self.default_closed_ach)
 
     def generation(self, co2: float, r_co2: float, vent_state: str) -> float:
         """CO2 generation rate G (ppm/h) from the mass balance."""
