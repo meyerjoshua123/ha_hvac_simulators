@@ -15,12 +15,19 @@
           "air_quality": "Air quality sensor (PM2.5 / VOC / AQI)",
           "aq_lower_is_better": "Lower air quality reading is better",
           "openings": "Door and window sensors",
-          "solar_threshold": "Solar gain threshold (outdoor °C)"
+          "solar_threshold": "Solar gain threshold (outdoor °C)",
+          "main_area": "Area this space's sensors are in",
+          "main_type": "Room type",
+          "main_air_gaps": "Known air gaps",
+          "main_air_gap_notes": "Air gap notes (e.g. gap under the hallway door)",
+          "use_virtual_openings": "Estimate open doors/windows when there are no door/window sensors"
         },
         "data_description": {
           "co2": "Only open doors/windows and extractor fans lower CO2 faster than normal. Also used to estimate how many people are home.",
           "air_quality": "Particulates/VOC. If this improves while CO2 does not, an aircon or purifier filter is working.",
-          "solar_threshold": "When it is warming indoors and outdoor temperature is at or above this, it's the sun; below it, heat is leaking in from outside."
+          "solar_threshold": "When it is warming indoors and outdoor temperature is at or above this, it's the sun; below it, heat is leaking in from outside.",
+          "use_virtual_openings": "Turns on an estimated 'Door or window open' sensor: it needs two signs of outside air (temperature and absolute humidity heading to outdoor levels, CO2 flushing out). Without door/window information, a fast CO2 drop can't be pinned on a fan rather than an open window.",
+          "main_air_gaps": "Leakier rooms exchange heat and air with outside faster; this sets the starting point until it's learned."
         }
       },
       "menu": {
@@ -35,7 +42,11 @@
         "title": "Add appliance",
         "data": {
           "name": "Name",
-          "type": "Type"
+          "type": "Type",
+          "room": "Area it's in (optional)"
+        },
+        "data_description": {
+          "room": "An appliance in an area without sensors (e.g. a bathroom fan) is observed by a sensored room it flows into."
         }
       },
       "appliance_details": {
@@ -58,14 +69,20 @@
           "members": "Fan names, comma separated (e.g. Bathroom, Kitchen, Laundry)",
           "airflow_m3h": "Airflow per fan",
           "power_entity": "Power sensor of its smart plug",
-          "on_threshold_w": "Counts as running above",
-          "idle_fan_w": "Fan-only power (compressor/element off)"
+          "on_threshold_w": "Off below",
+          "idle_fan_w": "Fan-only power (compressor/element off)",
+          "kind": "Appliance kind",
+          "active_above_w": "Active above (leave empty for the kind's default)",
+          "manual_timeout_min": "Manual mode/setpoint reverts to auto after (0 = never)",
+          "off_detect_min": "Assume it was switched off after drifting past the setpoint for (0 = never)"
         },
         "data_description": {
           "members": "Name them so each can be calibrated and identified; left blank they're Fan 1, Fan 2...",
           "airflow_m3h": "Used until you calibrate. Typical: bathroom 90, kitchen hood 300-600.",
           "power_entity": "Its learned heat and moisture effect is removed before HVAC detection, so e.g. a tumble dryer isn't mistaken for heating or a humidifier.",
-          "idle_fan_w": "Used when the unit is on but the room is already past its setpoint, e.g. cooling set to 18 °C in a 17 °C room."
+          "idle_fan_w": "Used when the unit is on but the room is already past its setpoint, e.g. cooling set to 18 °C in a 17 °C room.",
+          "kind": "Fridge, washer, dryer, oven/microwave, stove, or general (TV, iron, steamer, hair tools, soldering iron). Each gets an active/idle/off status from its plug, and its heat and moisture are removed before HVAC detection.",
+          "manual_timeout_min": "Useful if you set a mode or setpoint here and forget to switch back to auto detection."
         }
       },
       "hvac_functions": {
@@ -78,20 +95,25 @@
     },
     "error": {
       "setpoint_range": "Maximum must be above minimum",
-      "no_functions": "Pick at least one function"
+      "no_functions": "Pick at least one function",
+      "room_exists": "That area is already a room here"
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "HVAC Simulators",
-        "description": "Appliances: {appliances}",
+        "description": "Rooms: {rooms}\nAppliances: {appliances}",
         "menu_options": {
           "sensors": "Sensors",
           "tuning": "Tuning, occupancy and notifications",
           "add_appliance": "Add an appliance",
           "edit_appliance": "Edit an appliance",
-          "remove_appliance": "Remove an appliance"
+          "remove_appliance": "Remove an appliance",
+          "add_room": "Add a room (area)",
+          "edit_room": "Edit a room",
+          "remove_room": "Remove a room",
+          "room_links": "Room links (zones)"
         }
       },
       "sensors": {
@@ -105,12 +127,19 @@
           "air_quality": "Air quality sensor (PM2.5 / VOC / AQI)",
           "aq_lower_is_better": "Lower air quality reading is better",
           "openings": "Door and window sensors",
-          "solar_threshold": "Solar gain threshold (outdoor °C)"
+          "solar_threshold": "Solar gain threshold (outdoor °C)",
+          "main_area": "Area this space's sensors are in",
+          "main_type": "Room type",
+          "main_air_gaps": "Known air gaps",
+          "main_air_gap_notes": "Air gap notes (e.g. gap under the hallway door)",
+          "use_virtual_openings": "Estimate open doors/windows when there are no door/window sensors"
         },
         "data_description": {
           "co2": "Only open doors/windows and extractor fans lower CO2 faster than normal. Also used to estimate how many people are home.",
           "air_quality": "Particulates/VOC. If this improves while CO2 does not, an aircon or purifier filter is working.",
-          "solar_threshold": "When it is warming indoors and outdoor temperature is at or above this, it's the sun; below it, heat is leaking in from outside."
+          "solar_threshold": "When it is warming indoors and outdoor temperature is at or above this, it's the sun; below it, heat is leaking in from outside.",
+          "use_virtual_openings": "Turns on an estimated 'Door or window open' sensor: it needs two signs of outside air (temperature and absolute humidity heading to outdoor levels, CO2 flushing out). Without door/window information, a fast CO2 drop can't be pinned on a fan rather than an open window.",
+          "main_air_gaps": "Leakier rooms exchange heat and air with outside faster; this sets the starting point until it's learned."
         }
       },
       "tuning": {
@@ -132,14 +161,25 @@
           "sleep_start_hour": "Sleep starts (hour)",
           "sleep_end_hour": "Sleep ends (hour)",
           "notify_rating": "Notify when effectiveness drops to",
-          "notify_service": "Notify service (optional, e.g. notify.mobile_app_phone)"
+          "notify_service": "Notify service (optional, e.g. notify.mobile_app_phone)",
+          "solar_margin": "Indoor above outdoor by this much counts towards solar gain",
+          "update_mode": "Update",
+          "update_interval_s": "Update interval"
+        },
+        "data_description": {
+          "solar_margin": "Warming with the sun up while indoor is already this much warmer than outside can't be heat leaking in, so it points to the sun (combined with outdoor temperature; on cold days a heater is more likely).",
+          "update_mode": "Every sensor update gives faster reactions and 'since last reading' rates; the fixed interval uses less CPU."
         }
       },
       "add_appliance": {
         "title": "Add appliance",
         "data": {
           "name": "Name",
-          "type": "Type"
+          "type": "Type",
+          "room": "Area it's in (optional)"
+        },
+        "data_description": {
+          "room": "An appliance in an area without sensors (e.g. a bathroom fan) is observed by a sensored room it flows into."
         }
       },
       "edit_appliance": {
@@ -180,14 +220,20 @@
           "members": "Fan names, comma separated (e.g. Bathroom, Kitchen, Laundry)",
           "airflow_m3h": "Airflow per fan",
           "power_entity": "Power sensor of its smart plug",
-          "on_threshold_w": "Counts as running above",
-          "idle_fan_w": "Fan-only power (compressor/element off)"
+          "on_threshold_w": "Off below",
+          "idle_fan_w": "Fan-only power (compressor/element off)",
+          "kind": "Appliance kind",
+          "active_above_w": "Active above (leave empty for the kind's default)",
+          "manual_timeout_min": "Manual mode/setpoint reverts to auto after (0 = never)",
+          "off_detect_min": "Assume it was switched off after drifting past the setpoint for (0 = never)"
         },
         "data_description": {
           "members": "Name them so each can be calibrated and identified; left blank they're Fan 1, Fan 2...",
           "airflow_m3h": "Used until you calibrate. Typical: bathroom 90, kitchen hood 300-600.",
           "power_entity": "Its learned heat and moisture effect is removed before HVAC detection, so e.g. a tumble dryer isn't mistaken for heating or a humidifier.",
-          "idle_fan_w": "Used when the unit is on but the room is already past its setpoint, e.g. cooling set to 18 °C in a 17 °C room."
+          "idle_fan_w": "Used when the unit is on but the room is already past its setpoint, e.g. cooling set to 18 °C in a 17 °C room.",
+          "kind": "Fridge, washer, dryer, oven/microwave, stove, or general (TV, iron, steamer, hair tools, soldering iron). Each gets an active/idle/off status from its plug, and its heat and moisture are removed before HVAC detection.",
+          "manual_timeout_min": "Useful if you set a mode or setpoint here and forget to switch back to auto detection."
         }
       },
       "hvac_functions": {
@@ -196,11 +242,69 @@
         "data": {
           "functions": "Functions"
         }
+      },
+      "add_room": {
+        "title": "Add room",
+        "description": "Pick a Home Assistant area and its sensors.",
+        "data": {
+          "area_id": "Area",
+          "type": "Room type",
+          "temperature": "Temperature sensor",
+          "humidity": "Humidity sensor",
+          "co2": "CO2 sensor",
+          "air_quality": "Air quality sensor",
+          "openings": "Door and window sensors",
+          "volume_m3": "Air volume (floor area × ceiling height)",
+          "air_gaps": "Known air gaps",
+          "air_gap_notes": "Air gap notes",
+          "use_virtual_openings": "Estimate open doors/windows when there are no door/window sensors"
+        },
+        "data_description": {
+          "temperature": "Without a temperature sensor the room still gets humidity rates and shower detection, and its appliances are observed by a connected room.",
+          "type": "Bathrooms get shower detection; a shower also stops the rest of the zone blaming a humidifier for rising humidity."
+        }
+      },
+      "room_details": {
+        "title": "{name}",
+        "data": {
+          "type": "Room type",
+          "temperature": "Temperature sensor",
+          "humidity": "Humidity sensor",
+          "co2": "CO2 sensor",
+          "air_quality": "Air quality sensor",
+          "openings": "Door and window sensors",
+          "volume_m3": "Air volume (floor area × ceiling height)",
+          "air_gaps": "Known air gaps",
+          "air_gap_notes": "Air gap notes",
+          "use_virtual_openings": "Estimate open doors/windows when there are no door/window sensors"
+        },
+        "data_description": {
+          "temperature": "Without a temperature sensor the room still gets humidity rates and shower detection, and its appliances are observed by a connected room.",
+          "type": "Bathrooms get shower detection; a shower also stops the rest of the zone blaming a humidifier for rising humidity."
+        }
+      },
+      "edit_room": {
+        "title": "Edit room",
+        "data": {
+          "id": "Room"
+        }
+      },
+      "remove_room": {
+        "title": "Remove room",
+        "data": {
+          "id": "Room"
+        }
+      },
+      "room_links": {
+        "title": "Room links (zones)",
+        "description": "For each room, pick the rooms its air flows into: an open doorway, a hallway, a gap under the door. Linked rooms form a zone: an appliance in one room (say a bathroom fan) can then be seen in another room's sensors (say CO2 in the living room). Rooms: {rooms}",
+        "data": {}
       }
     },
     "error": {
       "setpoint_range": "Maximum must be above minimum",
-      "no_functions": "Pick at least one function"
+      "no_functions": "Pick at least one function",
+      "room_exists": "That area is already a room here"
     }
   },
   "services": {
