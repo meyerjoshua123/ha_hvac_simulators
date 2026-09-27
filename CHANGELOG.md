@@ -3,6 +3,28 @@
 All notable changes to HVAC Simulators are tracked here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-27
+
+### Added
+- **Rooms from Home Assistant areas.** The space's own sensors are the main room (now with an area, room type, air gaps and notes); add more rooms under Configure, each with its own temperature/humidity/CO2/air-quality/door-window sensors, air volume and known air gaps. Every room runs its own detection, learning, occupancy, fan groups, appliance-heat model and efficiency record, and gets its own device in its area.
+- **Zones from room links.** Pick which rooms flow into each other; linked rooms form a zone. An appliance in a room without sensors (e.g. a bathroom fan) is observed by a sensored room in its zone (e.g. the living room whose CO2 it clears). Appliances can be assigned to an area.
+- **Room-to-room differences**: temperature, humidity and absolute humidity versus the main room (e.g. laundry vs living room). A dryer plug linked to the laundry is learned in the laundry.
+- **Shower detection** for bathroom rooms (steep humidity surge); a shower in the zone stops other rooms blaming a humidifier.
+- **Virtual door/window sensor** for rooms without door/window sensors: needs two independent signs of outside air (temperature and absolute humidity heading to outdoor levels at an open-window rate, CO2 flushing out).
+- **Fan vs open window**: without door/window information, a fast CO2 drop is split between "extractor fan" and "airing out" instead of being pinned on a fan.
+- **Solar gain** now combines outdoor temperature with how far indoor sits above outdoor (new *solar margin* option); the margin counts fully on mild days and fades on cold ones, and very fast warming stays with heating. Night hours count as sun down when there is no sun entity.
+- **Plugged-in appliance kinds**: fridge, washer, dryer, oven/microwave, stove, general (TV, iron, steamer, hair tools, soldering iron). Each gets an active/idle/off **Status** sensor from its plug with cycles, 6-hour duty cycle, last active spell and last run length; dryers, stoves and washers start with a moisture prior.
+- **Manual timeouts**: a manual mode/setpoint can revert to auto detection after a set time.
+- **Switched-off detection** in manual heat/cool: drifting the wrong way past the setpoint for a set time (with no cycling) marks the unit off and returns it to auto. Both fire `hvac_simulators_appliance_event`.
+- **Update on every sensor change** (or a configurable interval), and **rate sensors** for temperature, humidity and CO2: since the last reading and over 5/10/15 minutes (hidden by default).
+- **Efficiency record** per room: heat-loss coefficient (30-day median), heat lost, heat leaked in, solar gain, appliance heat and ventilation air changes per day.
+- Absolute humidity features (indoor, outdoor, rate) in the engine.
+- README link to [hacs.luukza.com](https://hacs.luukza.com) and a note that the project was built with Claude Code.
+
+### Changed
+- Services accept room devices as well as the space and appliance devices.
+- Existing installs keep their entities: the old space becomes the main room with the same entity and device IDs, and stored learning moves into it automatically.
+
 ## [0.2.0] - 2026-09-27
 
 Learned from a real night in an apartment: an aircon in cool mode at 18 °C
