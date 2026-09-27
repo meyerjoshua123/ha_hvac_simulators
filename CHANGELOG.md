@@ -3,7 +3,27 @@
 All notable changes to HVAC Simulators are tracked here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-27
+
+Learned from a real night in an apartment: an aircon in cool mode at 18 °C
+while the room sensor read ~17 °C. Temperature barely moved because the
+building's thermal mass donated back the heat the aircon removed, but humidity
+swung ~2 %RH on a steady ~20 minute cycle: the compressor was cycling all night.
+
+### Added
+- **Compressor cycling detection** (`cycling.py`): finds regular on/off cycling in indoor humidity (periodic, anti-correlated at half the period, repeats at twice it, big enough swing). Rejects random humidity wander. Exposed as `compressor_cycling` on the suggested-mode sensor.
+- While cycling is detected in cool or dry mode, the appliance state follows the compressor: `active` while humidity falls, `idle` between cycles. Mode stays the same; cycles are counted; energy follows the real on-time.
+- Cycling counts as evidence for cooling (or dry mode) even when temperature is flat, and the in-cycle swings are no longer read as separate heating/humidifying events.
+- **Thermostat offset**: learned while cycling. The difference between the room sensor and the unit's own thermostat (about −1 °C on the recorded night) is shown on the State sensor and used when judging whether the room is past the setpoint.
+- **Fan-only power** per HVAC unit/heater, and an `idle_reason` on the State sensor: holding setpoint, between compressor cycles, or setpoint satisfied (compressor off).
+- Regression test replaying the recorded night (1-minute data, relative times only).
+
+### Fixed
+- Idle power: a unit that is idle because the room is already past its setpoint, or between compressor cycles, is charged fan-only power instead of inverter holding power. The recorded night had been charged ~2.2 kWh at a flat 217 W.
+- Manual heat/cool mode with no sensor history yet starts `idle` instead of charging full power.
+- The space device is created before appliance devices that link to it (Home Assistant 2025.12+ rejects links to devices that don't exist yet).
+
+## [0.1.0] - 2026-09-27
 
 ### Added
 - **HVAC functions**: an HVAC unit is set up by ticking what it can do (Heat, Ventilate, Air condition) and its modes follow: heat; cool and dehumidify (dry); ventilate (fresh air, lowers CO2) and filter (indoor recirculation, particulates only). Power is asked only for the modes it has.
@@ -16,7 +36,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 - Air conditioner type is now "HVAC unit"; old configs listing modes are mapped to functions.
 - A heat source switching on/off triggers an immediate re-evaluation.
 
-## [0.1.0-dev] - initial build
 
 ### Added
 - Integration scaffold (`custom_components/hvac_simulators`), HACS metadata.

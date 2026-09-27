@@ -55,6 +55,10 @@ Every appliance has a **mode** (heat / cool / dry / ventilate / filter / on / of
 
 If the temperature falls, rises a little, falls again and so on, the aircon stays in **cool** mode while its state cycles between `active` and `idle`. The midpoint of those highs and lows becomes the **detected setpoint**, kept within the min/max range you enter. The unit only counts as `off` once the temperature drifts beyond the setpoint band. A fixed-speed unit also counts as `off` if it stays idle longer than the max idle time; an inverter unit can hold its setpoint indefinitely.
 
+#### Cycling you can't see in the temperature
+
+In an apartment or other heavy building, a cooling unit can run all night while the room temperature hardly moves: neighbouring apartments and the concrete keep feeding heat back in. The compressor's on/off cycling still shows in **humidity**. The coil pulls moisture out while it runs, and it comes back while it rests, giving a regular swing every 15–25 minutes. HVAC Simulators detects that pattern. The unit then shows as cool (or dry) mode cycling between `active` and `idle`, and energy is charged for the real on-time. It also learns the **thermostat offset** between your room sensor and the unit's own thermostat.
+
 ### Effectiveness and filter reminders
 
 While heating or cooling, the integration measures how hard the unit pushes the temperature beyond the passive drift. It compares that with a baseline built after the last filter clean, **at the same indoor/outdoor temperature gap**, so a heatwave doesn't look like a dirty filter. The result is rated **Excellent → Great → Good → OK → Bad → Terrible**.
