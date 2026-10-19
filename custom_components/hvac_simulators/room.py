@@ -22,6 +22,7 @@ from .efficiency import EfficiencyTracker
 from .engine import (
     ACTIVE_CAUSES,
     CAUSE_HUMIDIFY,
+    CAUSE_IDLE,
     Features,
     Sample,
     SampleBuffer,
@@ -39,6 +40,8 @@ from .plugs import MOISTURE_PRIOR_PER_KW
 
 MAIN_ROOM = "main"
 CYCLE_HISTORY_S = 3 * 3600
+CYCLE_RECOMPUTE_S = 30
+CYCLE_PASSIVE_MAX = 0.3  # above this a compressor is cycling: not a passive moment
 FEEDBACK_CONFIDENCE = 0.6
 _OCCUPANCY_EMA = 0.3
 # Hysteresis for the estimated door/window.
@@ -203,6 +206,7 @@ class Room:
         self.features: Features | None = None
         self.prediction: Prediction | None = None
         self.cycle: dict[str, Any] | None = None
+        self._cycle_ts: float | None = None
         self.opening_estimate: dict[str, Any] = {"score": 0.0, "signals": {}}
         self.estimated_open = False
         self.shower_state: dict[str, Any] = {"showering": False, "score": 0.0, "rise_rh": None}
@@ -282,7 +286,11 @@ class Room:
         tuning = self.tuning
         mean_power = self.buffer.mean_gains(self.window_s, now)
         gains = self.gains.predict(mean_power)
-        self.cycle = detect_cycling(self.buffer.samples, now, CYCLE_HISTORY_S)
+        # Sensors report every ~30 s, evaluations can come far more often: the
+        # cycle picture only changes at sensor pace, so recompute at that pace.
+        if self._cycle_ts is None or now - self._cycle_ts >= CYCLE_RECOMPUTE_S:
+            self.cycle = detect_cycling(self.buffer.samples, now, CYCLE_HISTORY_S)
+            self._cycle_ts = now
         self.shower_state = shower(self.buffer, now)
         if self.shower_state["showering"]:
             self.last_shower_ts = now
@@ -438,6 +446,17 @@ class Room:
         cause = appliance.cause_for_mode(mode)
         if cause is not None and self.features is not None:
             self.learner.teach(self.features, make_label(cause, appliance.id), source=source, now=now)
+
+    def observe_passive(self, now: float) -> None:
+        """Note a moment when nothing ran, to learn how the room drifts by itself."""
+        f = self.features
+        if f is not None and f.cycle_strength < CYCLE_PASSIVE_MAX:
+            self.learner.observe_passive(f)
+
+    def teach_passive(self, now: float) -> None:
+        """Record that nothing is running now: the room is just drifting."""
+        if self.features is not None:
+            self.learner.teach(self.features, CAUSE_IDLE, source="manual", now=now)
 
     def calibrate_occupancy(self, now: float, people: int, activity: str, vent_state: str) -> bool:
         f = self.features

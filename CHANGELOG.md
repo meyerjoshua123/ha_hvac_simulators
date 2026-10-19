@@ -3,6 +3,25 @@
 All notable changes to HVAC Simulators are tracked here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-10-19
+
+Learned from a week of data in a large apartment block (stored building heat, aircon switched off in the morning and on again after work, floor-to-ceiling windows).
+
+### Added
+- **Learned building rest temperature.** With the windows closed the room now relaxes to a learned temperature (the heat the building holds) at a learned rate, instead of towards the outdoor temperature. It is fitted from moments when nothing was running: manual **off**, feedback labelled idle, and automatically when every appliance in the room has been judged off for 45 minutes. Warm-ups after the unit is switched off are no longer read as heating.
+- **Manual mode is a learning mode.** It teaches every 15 minutes and returns to auto after 16 examples (`learning_complete` event). Manual **off** teaches passive drift.
+- **Mode-flip check.** A unit that was heating or cooling cannot flip to the opposite mode within three hours unless the room is past the building's rest temperature (or the call is very confident).
+- Cycling detection on a 30-second grid (was one minute) with a 6-minute minimum period (was 8), and a faster implementation.
+- `idle_reason`: "manual mode set, but the room is moving the wrong way (fan only)".
+- **State confidence** sensor per appliance (and a `confidence` attribute on the state sensor).
+- **"Is it on?" questions.** When an appliance's confidence stays low, and as a daily check-in until answered, a persistent notification (and a phone notification with It is on / It is off / Not sure buttons when a notification service is set) asks whether it is on. Rate-limited: at most 3 a day, 6 hours apart per appliance, one open at a time, quiet for the first hour, during sleep hours and in manual mode. New **It is on** / **It is off** buttons answer from the appliance's device; "off" also teaches the building's rest temperature. Option **Occasionally ask whether an appliance is on** turns it off.
+
+### Fixed
+- **Manual mode no longer reports `active` just because the room is above the setpoint.** A cool unit in a room that keeps warming (or heat in a cooling room) shows idle after 10 minutes, charges fan-only power, and teaches nothing. Previously this produced false active spells for hours and about 23 kWh/day of simulated energy.
+- **Learned examples now fade with distance.** A learner taught a single label used to claim it for every situation. The learned vote now scales with how similar the taught examples are to the current one.
+- Switched-off detection: a short dip in the trend (under 10 minutes) no longer restarts the timer, and a room more than 3 °C on the wrong side counts regardless of slope or cycling.
+- Training examples are no longer taken from a manual mode the room contradicts.
+
 ## [0.3.0] - 2026-09-27
 
 ### Added

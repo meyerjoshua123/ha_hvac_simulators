@@ -147,6 +147,7 @@ async def async_setup_entry(
         entities.append(AppliancePowerSensor(manager, appliance))
         entities.append(ApplianceModeSensor(manager, appliance))
         entities.append(ApplianceStateSensor(manager, appliance))
+        entities.append(ApplianceConfidenceSensor(manager, appliance))
         if appliance.calculate_energy:
             entities.append(ApplianceEnergySensor(manager, appliance))
         if appliance.has_setpoint:
@@ -474,7 +475,27 @@ class ApplianceStateSensor(ApplianceEntity, SensorEntity):
             "duty_cycle": None if duty is None else round(duty * 100, 1),
             "manual_expires_at": sim.manual_expires_at,
             "observed_in_room": self.room.name,
+            "confidence": None if sim.confidence is None else round(sim.confidence * 100, 1),
+            "question_pending": sim.pending_ask_ts is not None,
         }
+
+
+class ApplianceConfidenceSensor(ApplianceEntity, SensorEntity):
+    """How sure the integration is of the appliance's current state."""
+
+    _attr_name = "State confidence"
+    _attr_icon = "mdi:gauge"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, manager: HvacSimulatorManager, appliance: Appliance) -> None:
+        super().__init__(manager, appliance, "state_confidence")
+
+    @callback
+    def _refresh(self) -> None:
+        c = self.sim.confidence
+        self._attr_native_value = None if c is None else round(c * 100, 1)
 
 
 class EffectivenessSensor(ApplianceEntity, SensorEntity):

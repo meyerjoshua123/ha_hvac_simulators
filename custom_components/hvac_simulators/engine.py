@@ -116,6 +116,9 @@ class Tuning:
     co2_outdoor: float = 420.0  # ppm of outdoor air
     ach_natural: float = 0.5  # natural air changes per hour with everything closed
     vent_factor: float = 2.0  # CO2 decay this many times faster than natural = ventilation
+    # Temperature the closed room settles to by itself (heat stored in the
+    # building, neighbouring flats). Learned; None = drift towards outdoor air.
+    t_rest: float | None = None
 
 
 @dataclass
@@ -149,6 +152,8 @@ class Features:
     cycle_strength: float = 0.0
     cycle_period_min: float | None = None
     compressor_on: bool | None = None
+    # Learned temperature the closed room relaxes to on its own (None = unknown).
+    t_rest: float | None = None
 
     @property
     def delta_out(self) -> float | None:
@@ -183,6 +188,7 @@ class Features:
             "cycle_strength": self.cycle_strength,
             "cycle_period_min": self.cycle_period_min,
             "compressor_on": self.compressor_on,
+            "t_rest": None if self.t_rest is None else round(self.t_rest, 2),
         }
 
     @classmethod
@@ -205,6 +211,7 @@ class Features:
             ach_obs=_opt(data.get("ach_obs")),
             gain_t=float(data.get("gain_t", 0.0)),
             gain_h=float(data.get("gain_h", 0.0)),
+            t_rest=_opt(data.get("t_rest")),
         )
 
     @property
@@ -313,7 +320,14 @@ def absolute_humidity(t_c: float | None, rh: float | None) -> float | None:
 
 
 def expected_passive_rate(t_in: float, t_out: float | None, is_open: bool, tuning: Tuning) -> float:
-    """Newton's-law estimate of the temperature change the shell alone explains."""
+    """Newton's-law estimate of the temperature change the shell alone explains.
+
+    With the windows open the room exchanges air with outside. Closed, it
+    relaxes towards the learned rest temperature (building heat) when known,
+    otherwise towards the outdoor temperature.
+    """
+    if not is_open and tuning.t_rest is not None:
+        return tuning.k_closed * (tuning.t_rest - t_in)
     if t_out is None:
         return 0.0
     k = tuning.k_open if is_open else tuning.k_closed
@@ -393,6 +407,7 @@ def compute_features(
         cycle_strength=float((cycle or {}).get("strength") or 0.0),
         cycle_period_min=(cycle or {}).get("period_min"),
         compressor_on=(cycle or {}).get("compressor_on"),
+        t_rest=tuning.t_rest,
     )
 
 
@@ -408,6 +423,10 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
     resid = f.residual
     closed = not f.is_open
     d_out = f.delta_out
+    # What the closed room is relaxing towards: the learned building rest
+    # temperature if known, else outdoor air.
+    building = closed and f.t_rest is not None
+    ref_delta = (f.t_rest - f.t_in) if building else d_out  # type: ignore[operator]
     scores: dict[str, float] = {c: 0.0 for c in ALL_CAUSES}
     reasons: dict[str, list[str]] = {c: [] for c in ALL_CAUSES}
 
@@ -458,10 +477,14 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
     # Heating: warming faster than the building shell explains.
     if rt > 0:
         heat = ramp(resid, at * 0.5, at * 1.5)
-        if d_out is not None and d_out > 0:
+        if ref_delta is not None and ref_delta > 0:
             heat *= 0.7
             if heat > 0:
-                reasons[CAUSE_HEATING].append("Outside is warmer, so some warming is passive")
+                reasons[CAUSE_HEATING].append(
+                    "The building is warmer than the room, so some warming is passive"
+                    if building
+                    else "Outside is warmer, so some warming is passive"
+                )
         if closed:
             heat *= 1.0 - 0.5 * solar_likelihood
         if f.is_open and d_out is not None and d_out > 0:
@@ -590,7 +613,7 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
 
     # Passive drift with everything closed.
     explained = ramp(abs(resid), at, at * 0.3)
-    if closed and d_out is not None:
+    if closed and ref_delta is not None:
         if rt > st * 0.5:
             warming = ramp(rt, st * 0.5, st * 1.5)
             if solar_likelihood > 0:
@@ -602,15 +625,19 @@ def score_causes(f: Features, tuning: Tuning) -> RuleResult:
                         f"Warming with the sun up; outside {f.t_out:.1f} °C "
                         f"(solar threshold {tuning.solar_threshold:.1f} °C), indoor {-d_out:+.1f} °C vs outside"
                     )
-            if d_out > 0.5:
+            if ref_delta > 0.5:
                 scores[CAUSE_HEAT_LEAK_IN] = warming * explained * (1.0 - solar_likelihood)
                 reasons[CAUSE_HEAT_LEAK_IN].append(
-                    f"Outside is {d_out:.1f} °C warmer; warming matches passive leakage"
+                    f"The building holds {f.t_rest:.1f} °C; warming matches the room settling back to it"
+                    if building
+                    else f"Outside is {ref_delta:.1f} °C warmer; warming matches passive leakage"
                 )
-        elif rt < -st * 0.5 and d_out < -0.5:
+        elif rt < -st * 0.5 and ref_delta < -0.5:
             scores[CAUSE_HEAT_LOSS] = ramp(-rt, st * 0.5, st * 1.5) * explained
             reasons[CAUSE_HEAT_LOSS].append(
-                f"Outside is {-d_out:.1f} °C colder; cooling matches passive heat loss"
+                f"The building holds {f.t_rest:.1f} °C; cooling matches the room settling to it"
+                if building
+                else f"Outside is {-ref_delta:.1f} °C colder; cooling matches passive heat loss"
             )
 
     # Regular compressor cycling in humidity: a cooling or dry-mode unit holding

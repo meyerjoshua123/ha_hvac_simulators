@@ -77,11 +77,25 @@ When the room falls, rises a little and falls again, the aircon stays in cool mo
 
 The state sensor's `idle_reason` tells you which kind of idle it is: holding the setpoint, between compressor cycles, or setpoint already satisfied (compressor off, fan only).
 
-### Manual mode, timeouts and "switched off"
+**Stored building heat.** In a big building a room doesn't drift towards the outdoor temperature when the unit stops: it settles back to whatever the building holds (23 to 24 °C in one test flat, whatever the weather). The integration learns that **rest temperature** and how fast the room returns to it from moments when nothing was running, and uses it in place of the outdoor temperature when the windows are closed. A room warming back up after you switch the aircon off is then recognised as the building, not as a heater. A unit that was cooling is also not allowed to flip to "heating" within three hours unless the room is above that rest temperature (or the integration is very sure).
 
-Use the appliance's **Manual mode** and **Setpoint** entities to tell it what you set on the unit. Per appliance you choose:
+**Sensor pace.** Cycling is detected on a 30-second grid, matching how often room sensors report, so short cycles and the moment the compressor switches keep their timing.
+
+### Confidence, and "is it on?" questions
+
+Each appliance has a **State confidence** sensor (also an attribute on its state sensor): how sure the integration is of the current state. It is the classifier's confidence, raised by a clear compressor-cycling pattern, lowered when a manual mode is contradicted by the room or when an implausible mode flip was refused.
+
+When the confidence stays low for 10 minutes, and once a day as a check-in until you have answered, the integration asks **"Is the aircon on?"** as a persistent notification, and as a phone notification with **It is on / It is off / Not sure** buttons if you set a notification service. It is never a bombardment: at most 3 a day, at least 6 hours apart per appliance, one open question at a time, none in the first hour after a restart, none during your sleep hours, none while a manual mode is set, and none for fan groups. You can also answer any time with the **It is on** and **It is off** buttons on the appliance's device. "On" teaches what that appliance looks like; "off" teaches how the room drifts by itself (building heat). Turn the questions off with **Occasionally ask whether an appliance is on** under Configure.
+
+### Manual mode is a learning mode
+
+Use the appliance's **Manual mode** and **Setpoint** entities to tell it what you set on the unit. While a manual mode is set, the integration records a training example every 15 minutes (while the unit is running, or, for **off**, while the room just drifts). After 16 examples (about four hours of running) it hands back to automatic detection by itself and fires `learning_complete`. Set it to **off** at the times you know nothing is running (leaving for work) to teach it how your room drifts by itself.
+
+A manual cool or heat mode is not blindly trusted: if the room keeps moving the wrong way for 10 minutes (a cooling unit in a room that keeps warming), the unit shows as idle with the reason "room is moving the wrong way" and no training examples are taken from it.
+
+Per appliance you also choose:
 - **Manual timeout**: revert to automatic detection after N minutes, or never.
-- **Switched-off detection**: in manual heat or cool, if the room drifts the wrong way past the setpoint for N minutes (with no cycling seen), the unit is marked off and returns to auto.
+- **Switched-off detection**: in manual heat or cool, if the room sits on the wrong side of the setpoint for N minutes, the unit is marked off and returns to auto. Short dips in the trend don't restart the timer, and a room more than 3 °C past the setpoint counts even while cycling is seen.
 
 Both fire an `hvac_simulators_appliance_event` for your automations.
 
@@ -153,7 +167,9 @@ To calibrate, use *People home (calibrate)* or `calibrate_occupancy`:
 | `button.<room>_suggestion_is_correct` | The current suggestion is right |
 | `select.<room>_actual_mode_teach` | Pick what's really happening |
 | `binary_sensor.<room>_needs_feedback` | On when an active suggestion is uncertain: a good moment to teach |
-| `select.<appliance>_manual_mode`, `number.<appliance>_setpoint` | What you set on the unit (also teaches every 15 min) |
+| `button.<appliance>_it_is_on`, `button.<appliance>_it_is_off` | Answer "is it on?" (teaches the model) |
+| `sensor.<appliance>_state_confidence` | How sure the integration is of the appliance's state (%) |
+| `select.<appliance>_manual_mode`, `number.<appliance>_setpoint` | What you set on the unit (learning mode: teaches every 15 min, then returns to auto) |
 | `hvac_simulators.calibrate` | Record mode / state / setpoint / filter (clean, ok, dirty), or which fans are running |
 | `hvac_simulators.calibrate_occupancy` | Head count + activity for a room |
 | `hvac_simulators.teach`, `confirm`, `reset_learning`, `set_manual`, `reset_energy` | Service equivalents (target a room or appliance device) |

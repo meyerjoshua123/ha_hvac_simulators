@@ -231,3 +231,62 @@ def test_switched_off_detected_in_manual_cool():
         sim.update(t, _features(24.5, r_t=0.6), None, 0.0, 0.45, 1.0, False)
     assert sim.status == SIM_OFF and sim.mode == "off"
     assert sim.manual_mode == MANUAL_AUTO and sim.last_event == "switched_off_detected"
+
+
+def _ac(**extra):
+    return Appliance.from_config({"id": "a", "type": "aircon", "functions": ["aircon"], **extra})
+
+
+def test_manual_cool_not_active_while_room_warms_against_it():
+    # Recorded case: manual cool at 18 °C, room 21 °C and climbing 3 °C/h with
+    # 14 °C outside. The room is above the setpoint but the unit is not cooling it.
+    sim = ApplianceSimulator(_ac(off_detect_min=0))
+    sim.set_manual(0.0, "cool", 18.0)
+    f = _features(21.0, r_t=3.0, t_out=14.0)
+    assert f.residual > 0.5
+    for minute in range(1, 16):
+        sim.update(minute * 60.0, f, None, 0.0, 0.45, 1.0, False)
+    assert sim.manual_contradicted and sim.status == STATUS_IDLE
+    assert "wrong way" in sim.idle_reason
+
+
+def test_manual_cool_active_when_room_is_falling():
+    sim = ApplianceSimulator(_ac(off_detect_min=0))
+    sim.set_manual(0.0, "cool", 18.0)
+    f = _features(21.0, r_t=-2.0, t_out=30.0)
+    for minute in range(1, 16):
+        sim.update(minute * 60.0, f, None, 0.0, 0.45, 1.0, False)
+    assert not sim.manual_contradicted and sim.status == STATUS_ACTIVE
+
+
+def test_switched_off_when_far_past_setpoint_even_if_slope_falls():
+    sim = ApplianceSimulator(_ac(off_detect_min=30))
+    sim.set_manual(0.0, "cool", 22.0)
+    t = 0.0
+    for _ in range(40):  # 4 °C over the setpoint, trend slightly down
+        t += 60
+        sim.update(t, _features(26.0, r_t=-0.5), None, 0.0, 0.45, 1.0, False)
+    assert sim.status == SIM_OFF and sim.last_event == "switched_off_detected"
+
+
+def test_switched_off_survives_short_slope_dip():
+    sim = ApplianceSimulator(_ac(off_detect_min=30))
+    sim.set_manual(0.0, "cool", 22.0)
+    t = 0.0
+    for minute in range(40):
+        t += 60
+        r_t = -0.5 if 10 <= minute < 15 else 0.6  # 5-minute dip, 2.5 °C over setpoint
+        sim.update(t, _features(24.5, r_t=r_t), None, 0.0, 0.45, 1.0, False)
+    assert sim.status == SIM_OFF and sim.last_event == "switched_off_detected"
+
+
+def test_finish_learning_hands_back_to_auto_and_mode_change_resets_count():
+    sim = ApplianceSimulator(_ac())
+    sim.set_manual(0.0, "cool", 18.0)
+    sim.manual_taught = 5
+    sim.set_manual(10.0, "cool")  # same mode: keep counting
+    assert sim.manual_taught == 5
+    sim.set_manual(20.0, "heat")  # different mode: start again
+    assert sim.manual_taught == 0
+    sim.finish_learning()
+    assert sim.manual_mode == MANUAL_AUTO and sim.last_event == "learning_complete"

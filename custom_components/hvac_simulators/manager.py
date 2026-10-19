@@ -27,7 +27,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from .appliances import Appliance
+from .appliances import MODE_COOL, MODE_DRY, MODE_HEAT, MODE_OFF, Appliance
 from .const import (
     CONF_ACTIVE_RATE,
     CONF_AIR_QUALITY,
@@ -40,6 +40,7 @@ from .const import (
     CONF_HOLD_BAND,
     CONF_INDOOR_HUMIDITY,
     CONF_INDOOR_TEMP,
+    CONF_ASK_STATE,
     CONF_LEARN_FROM_MANUAL,
     CONF_MAIN_AIR_GAP_NOTES,
     CONF_MAIN_AIR_GAPS,
@@ -71,6 +72,7 @@ from .const import (
     DEFAULT_CO2_OUTDOOR,
     DEFAULT_DEHUMID_RATE,
     DEFAULT_HOLD_BAND,
+    DEFAULT_ASK_STATE,
     DEFAULT_LEARN_FROM_MANUAL,
     DEFAULT_MAX_IDLE_MINUTES,
     DEFAULT_MAX_LEARNED_WEIGHT,
@@ -88,8 +90,15 @@ from .const import (
     EFFECTIVENESS_WARMUP_FRACTION,
     EVENT_APPLIANCE,
     EVENT_EFFECTIVENESS,
+    ASK_ACTION_PREFIX,
+    ASK_EXPIRE_S,
+    ASK_WARMUP_S,
+    MOBILE_ACTION_EVENT,
+    MANUAL_LEARN_EXAMPLES,
     MANUAL_TEACH_INTERVAL_S,
     MIN_EVAL_GAP_ON_CHANGE_S,
+    PASSIVE_OBSERVE_INTERVAL_S,
+    PASSIVE_SETTLE_S,
     SIGNAL_UPDATE,
     STORAGE_VERSION,
     UPDATE_MODE_ON_CHANGE,
@@ -113,7 +122,7 @@ from .room import (
     observing_room,
     zones,
 )
-from .simulator import MANUAL_AUTO, STATUS_ACTIVE, STATUS_OFF, ApplianceSimulator
+from .simulator import MANUAL_AUTO, STATUS_ACTIVE, STATUS_IDLE, STATUS_OFF, ApplianceSimulator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -146,6 +155,7 @@ class HvacSimulatorManager:
         self.min_confidence = float(self._opt(CONF_MIN_CONFIDENCE, DEFAULT_MIN_CONFIDENCE))
         self.hold_band = float(self._opt(CONF_HOLD_BAND, DEFAULT_HOLD_BAND))
         self.learn_from_manual = bool(self._opt(CONF_LEARN_FROM_MANUAL, DEFAULT_LEARN_FROM_MANUAL))
+        self.ask_state = bool(self._opt(CONF_ASK_STATE, DEFAULT_ASK_STATE))
         self.update_on_change = self.config.get(CONF_UPDATE_MODE) == UPDATE_MODE_ON_CHANGE
         self.update_interval_s = max(5.0, float(self._opt(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)))
         self.base_tuning = Tuning(
@@ -188,6 +198,8 @@ class HvacSimulatorManager:
         self._unsubs: list[Callable[[], None]] = []
         self._last_eval = 0.0
         self._last_manual_teach: dict[str, float] = {}
+        self._last_passive_obs: dict[str, float] = {}
+        self._started_at = time.time()
 
     def _opt(self, key: str, default: Any) -> Any:
         value = self.config.get(key)
@@ -261,6 +273,8 @@ class HvacSimulatorManager:
                 self.hass, self._handle_interval, timedelta(seconds=self.update_interval_s)
             )
         )
+        # Answers to "is it on?" given from a phone notification's action buttons.
+        self._unsubs.append(self.hass.bus.async_listen(MOBILE_ACTION_EVENT, self._handle_notification_action))
         self._evaluate()
 
     async def async_stop(self) -> None:
@@ -464,20 +478,151 @@ class HvacSimulatorManager:
             plug.update(now, self.source_power.get(plug_id))
         self._check_effectiveness()
         self._teach_from_manual(now)
+        self._observe_passive(now)
+        self._maybe_ask(now)
         self._schedule_save()
         async_dispatcher_send(self.hass, SIGNAL_UPDATE.format(self.entry_id))
 
+    # --- "is it on?" questions ---------------------------------------------------------
+
+    def _ask_notification_id(self, appliance_id: str) -> str:
+        return f"{DOMAIN}_{self.entry_id}_{appliance_id}_ask"
+
+    def _maybe_ask(self, now: float) -> None:
+        """Now and then, when unsure, ask whether an appliance is on. Never a burst."""
+        if not self.ask_state or now - self._started_at < ASK_WARMUP_S:
+            return
+        asleep = self.activity == ACTIVITY_SLEEPING
+        # One question per evaluation at most, and not while another is waiting.
+        if any(s.pending_ask_ts is not None and now - s.pending_ask_ts < ASK_EXPIRE_S for s in self.sims.values()):
+            return
+        for sim in self.sims.values():
+            if sim.confidence is not None and sim.ask_due(now, asleep):
+                sim.mark_asked(now)
+                self._send_question(sim)
+                return
+
+    def _state_text(self, sim: ApplianceSimulator) -> str:
+        if sim.status == STATUS_OFF:
+            return "off"
+        mode = {"heat": "heating", "cool": "cooling", "dry": "drying", "fan": "fan only"}.get(sim.mode, "on")
+        return f"{mode}, {sim.status}"
+
+    def _send_question(self, sim: ApplianceSimulator) -> None:
+        name = sim.appliance.name
+        pct = round((sim.confidence or 0.0) * 100)
+        title = f"Is {name} on?"
+        message = (
+            f"I think {name} is {self._state_text(sim)}, but I'm only {pct}% sure. "
+            f"Is it on right now? Press \"It is on\" or \"It is off\" on the {name} device "
+            "(or answer from your phone). Your answer teaches the model; I only ask now and then."
+        )
+        persistent_notification.async_create(
+            self.hass, message, title=title, notification_id=self._ask_notification_id(sim.appliance.id)
+        )
+        if self.notify_service:
+            domain, _, service = self.notify_service.partition(".")
+            if not service:
+                domain, service = "notify", domain
+            base = f"{ASK_ACTION_PREFIX}_{self.entry_id}_{sim.appliance.id}"
+            data = {
+                "title": title,
+                "message": message,
+                "data": {
+                    "tag": self._ask_notification_id(sim.appliance.id),
+                    "actions": [
+                        {"action": f"{base}_on", "title": "It is on"},
+                        {"action": f"{base}_off", "title": "It is off"},
+                        {"action": f"{base}_skip", "title": "Not sure"},
+                    ],
+                },
+            }
+            self.hass.async_create_task(self.hass.services.async_call(domain, service, data))
+
+    @callback
+    def _handle_notification_action(self, event: Event) -> None:
+        action = str(event.data.get("action") or "")
+        prefix = f"{ASK_ACTION_PREFIX}_{self.entry_id}_"
+        if not action.startswith(prefix):
+            return
+        appliance_id, _, verb = action[len(prefix) :].rpartition("_")
+        if appliance_id in self.sims and verb in ("on", "off", "skip"):
+            self.answer(appliance_id, {"on": True, "off": False}.get(verb))
+
+    def answer(self, appliance_id: str, is_on: bool | None) -> None:
+        """The user says whether the appliance is on (None = not sure). Teaches the model."""
+        sim = self.sims[appliance_id]
+        room = self.room_of(appliance_id)
+        now = time.time()
+        sim.mark_answered(now)
+        persistent_notification.async_dismiss(self.hass, self._ask_notification_id(appliance_id))
+        if is_on is True:
+            mode = sim.mode if sim.mode in (MODE_HEAT, MODE_COOL, MODE_DRY) else self._guess_mode(sim, room)
+            status = sim.status if sim.status in (STATUS_ACTIVE, STATUS_IDLE) else STATUS_ACTIVE
+            self.calibrate(appliance_id, mode, status, None, None)
+        elif is_on is False:
+            self.calibrate(appliance_id, MODE_OFF, STATUS_OFF, None, None)
+            room.teach_passive(now)
+            self._evaluate()
+        else:
+            self._evaluate()
+
+    @staticmethod
+    def _guess_mode(sim: ApplianceSimulator, room: Room) -> str | None:
+        """Which mode a unit that is on is most likely in, from which way the room is pushed."""
+        modes = [m for m in sim.appliance.modes if m in (MODE_HEAT, MODE_COOL)]
+        if not modes:
+            return None
+        f = room.features
+        if f is not None and f.residual < 0 and MODE_COOL in modes:
+            return MODE_COOL
+        if f is not None and f.residual >= 0 and MODE_HEAT in modes:
+            return MODE_HEAT
+        return modes[0]
+
+    def _observe_passive(self, now: float) -> None:
+        """With every appliance in a room off and settled, its drift is passive: learn from it."""
+        for room_id, room in self.rooms.items():
+            if now - self._last_passive_obs.get(room_id, 0.0) < PASSIVE_OBSERVE_INTERVAL_S:
+                continue
+            sims = [s for s in self.sims.values() if self.appliance_room[s.appliance.id] == room_id]
+            if not sims or room.features is None or room.features.is_open:
+                continue
+            if any(
+                s.manual_mode != MANUAL_AUTO
+                or s.off_since is None
+                or now - s.off_since < PASSIVE_SETTLE_S
+                for s in sims
+            ):
+                continue
+            self._last_passive_obs[room_id] = now
+            room.observe_passive(now)
+
     def _teach_from_manual(self, now: float) -> None:
-        """A manually-set mode is ground truth: learn from it periodically."""
+        """A manually-set mode is ground truth: learn from it periodically.
+
+        Manual mode is a learning mode: "off" teaches how the room drifts with no
+        appliance running (building heat, sun), any other mode teaches what that
+        appliance looks like. After enough examples it hands back to auto.
+        """
         if not self.learn_from_manual:
             return
         for sim in self.sims.values():
-            if sim.manual_mode in (MANUAL_AUTO, "off") or sim.status != STATUS_ACTIVE:
+            if sim.manual_mode == MANUAL_AUTO:
+                continue
+            if sim.manual_mode != "off" and (sim.status != STATUS_ACTIVE or sim.manual_contradicted):
                 continue
             if now - self._last_manual_teach.get(sim.appliance.id, 0.0) < MANUAL_TEACH_INTERVAL_S:
                 continue
             self._last_manual_teach[sim.appliance.id] = now
-            self.room_of(sim.appliance.id).teach_mode(sim.appliance, sim.manual_mode, now, "manual")
+            room = self.room_of(sim.appliance.id)
+            if sim.manual_mode == "off":
+                room.teach_passive(now)
+            else:
+                room.teach_mode(sim.appliance, sim.manual_mode, now, "manual")
+            sim.manual_taught += 1
+            if sim.manual_taught >= MANUAL_LEARN_EXAMPLES:
+                sim.finish_learning()
 
     # --- occupancy / activity -----------------------------------------------------
 

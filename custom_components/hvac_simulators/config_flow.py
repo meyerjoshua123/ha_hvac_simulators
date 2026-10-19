@@ -58,6 +58,7 @@ from .const import (
     CONF_INDOOR_TEMP,
     CONF_INVERTER,
     CONF_KIND,
+    CONF_ASK_STATE,
     CONF_LEARN_FROM_MANUAL,
     CONF_MAIN_AIR_GAP_NOTES,
     CONF_MAIN_AIR_GAPS,
@@ -98,6 +99,7 @@ from .const import (
     DEFAULT_CO2_OUTDOOR,
     DEFAULT_DEHUMID_RATE,
     DEFAULT_HOLD_BAND,
+    DEFAULT_ASK_STATE,
     DEFAULT_LEARN_FROM_MANUAL,
     DEFAULT_MAX_IDLE_MINUTES,
     DEFAULT_MAX_LEARNED_WEIGHT,
@@ -311,6 +313,7 @@ def _tuning_schema(current: dict[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_LEARN_FROM_MANUAL, default=d(CONF_LEARN_FROM_MANUAL, DEFAULT_LEARN_FROM_MANUAL)
             ): selector.BooleanSelector(),
+            vol.Required(CONF_ASK_STATE, default=d(CONF_ASK_STATE, DEFAULT_ASK_STATE)): selector.BooleanSelector(),
             vol.Required(
                 CONF_MAX_IDLE_MINUTES, default=d(CONF_MAX_IDLE_MINUTES, DEFAULT_MAX_IDLE_MINUTES)
             ): _num(5, 720, 5, "min"),

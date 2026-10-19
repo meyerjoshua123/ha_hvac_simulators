@@ -47,6 +47,7 @@ CONF_MIN_CONFIDENCE = "min_confidence"
 CONF_MAX_LEARNED_WEIGHT = "max_learned_weight"
 CONF_HOLD_BAND = "hold_band"
 CONF_LEARN_FROM_MANUAL = "learn_from_manual"
+CONF_ASK_STATE = "ask_state"
 CONF_MAX_IDLE_MINUTES = "max_idle_minutes"
 CONF_CO2_OUTDOOR = "co2_outdoor"
 CONF_VOLUME = "volume_m3"
@@ -76,6 +77,7 @@ DEFAULT_MIN_CONFIDENCE = 0.45
 DEFAULT_MAX_LEARNED_WEIGHT = 0.75
 DEFAULT_HOLD_BAND = 1.0
 DEFAULT_LEARN_FROM_MANUAL = True
+DEFAULT_ASK_STATE = True
 DEFAULT_MAX_IDLE_MINUTES = 60
 DEFAULT_CO2_OUTDOOR = 420.0
 DEFAULT_VOLUME = 100.0
@@ -115,6 +117,23 @@ CONF_CALCULATE_ENERGY = "calculate_energy"
 UPDATE_INTERVAL_S = 60
 # While the user keeps a manual mode set, record a training example this often.
 MANUAL_TEACH_INTERVAL_S = 15 * 60
+# Manual mode is a learning mode: after this many examples (about 4 hours of the
+# unit running) it hands back to auto.
+MANUAL_LEARN_EXAMPLES = 16
+# With every appliance off, note the room's drift this often, once the unit has
+# been off long enough for the quick air-temperature transient to die away.
+PASSIVE_OBSERVE_INTERVAL_S = 5 * 60
+# Occasionally ask "is it on?": only when unsure, never in a burst.
+ASK_CONFIDENCE = 0.6  # ask when the state confidence stays below this...
+ASK_LOW_FOR_S = 10 * 60  # ...for this long
+ASK_MIN_INTERVAL_S = 6 * 3600  # at least this long between questions per appliance
+ASK_MAX_PER_DAY = 3
+ASK_PERIODIC_S = 24 * 3600  # one check-in a day even when confident, until it has been answered
+ASK_EXPIRE_S = 12 * 3600  # an unanswered question is dropped after this
+ASK_WARMUP_S = 3600  # no questions in the first hour after start: nothing to be unsure about yet
+ASK_ACTION_PREFIX = "HVACSIM"
+MOBILE_ACTION_EVENT = "mobile_app_notification_action"
+PASSIVE_SETTLE_S = 45 * 60
 # Below this confidence an active suggestion asks for feedback.
 FEEDBACK_CONFIDENCE = 0.6
 

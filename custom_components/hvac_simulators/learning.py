@@ -35,6 +35,16 @@ KNN_K = 7
 DEFAULT_MAX_LEARNED_WEIGHT = 0.75
 _WEIGHT_HALF_POINT = 15  # examples at which the learned vote gets half its max weight
 _PASSIVE_EMA = 0.2
+# Mean feature distance at which taught examples carry half their usual weight.
+_PROXIMITY_SCALE = 2.0
+# Building rest temperature: fitted from closed-room drift when no appliance is running.
+_REST_POINTS_KEPT = 240
+_REST_MIN_POINTS = 12
+_REST_MIN_SPREAD = 1.5  # °C of indoor range needed to tell the slope from noise
+_REST_MIN_R2 = 0.35
+_REST_K_RANGE = (0.03, 1.5)  # per hour
+_REST_T_RANGE = (8.0, 40.0)
+_REST_EMA = 0.3
 
 
 @dataclass
@@ -76,6 +86,40 @@ class Prediction:
     reasons: list[str] = field(default_factory=list)
 
 
+def fit_rest(points: list[list[float]]) -> tuple[float, float] | None:
+    """Fit ``r_t = k * (t_rest - t_in)`` to (t_in, r_t) points; None unless the fit is credible."""
+    if len(points) < _REST_MIN_POINTS:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    if max(xs) - min(xs) < _REST_MIN_SPREAD:
+        return None
+    n = len(points)
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx == 0 or syy == 0:
+        return None
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    slope = sxy / sxx
+    if slope >= 0:
+        return None
+    k = -slope
+    if not _REST_K_RANGE[0] <= k <= _REST_K_RANGE[1]:
+        return None
+    if sxy * sxy / (sxx * syy) < _REST_MIN_R2:
+        return None
+    t_rest = mx + my / k  # r_t = 0 at t_in = mx + my / k
+    if not _REST_T_RANGE[0] <= t_rest <= _REST_T_RANGE[1]:
+        return None
+    return k, t_rest
+
+
+def proximity(distance: float) -> float:
+    """1 when the taught examples match the situation, fading as they get less similar."""
+    return 1.0 / (1.0 + (distance / _PROXIMITY_SCALE) ** 2)
+
+
 def feature_vector(f: Features, tuning: Tuning) -> list[float]:
     """Scale features so each dimension matters roughly equally."""
     d_out = f.delta_out
@@ -101,6 +145,10 @@ class Learner:
         self.max_learned_weight = max_learned_weight
         self.k_closed: float | None = None
         self.k_open: float | None = None
+        # Temperature the closed room settles to by itself (building heat), and
+        # the (indoor °C, °C/h) points it is fitted from.
+        self.t_rest: float | None = None
+        self.rest_points: list[list[float]] = []
         self.appliance_counts: dict[str, int] = {}
         self.confirmed = 0
         self.corrected = 0
@@ -112,6 +160,8 @@ class Learner:
             "samples": [s.as_dict() for s in self.samples],
             "k_closed": self.k_closed,
             "k_open": self.k_open,
+            "t_rest": self.t_rest,
+            "rest_points": self.rest_points,
             "appliance_counts": dict(self.appliance_counts),
             "confirmed": self.confirmed,
             "corrected": self.corrected,
@@ -128,6 +178,10 @@ class Learner:
                 continue
         self.k_closed = data.get("k_closed")
         self.k_open = data.get("k_open")
+        self.t_rest = data.get("t_rest")
+        self.rest_points = [
+            [float(a), float(b)] for a, b in (data.get("rest_points") or []) if a is not None and b is not None
+        ]
         self.appliance_counts = {str(k): int(v) for k, v in data.get("appliance_counts", {}).items()}
         self.confirmed = int(data.get("confirmed", 0))
         self.corrected = int(data.get("corrected", 0))
@@ -155,6 +209,7 @@ class Learner:
             tuning,
             k_closed=self.k_closed if self.k_closed is not None else tuning.k_closed,
             k_open=self.k_open if self.k_open is not None else tuning.k_open,
+            t_rest=self.t_rest if self.t_rest is not None else tuning.t_rest,
         )
 
     # --- teaching --------------------------------------------------------
@@ -180,11 +235,40 @@ class Learner:
         cause, appliance_id = split_label(label)
         if appliance_id is not None:
             self.appliance_counts[label] = self.appliance_counts.get(label, 0) + 1
+        self._update_rest(features, cause)
         self._update_passive(features, cause)
+
+    def observe_passive(self, f: Features) -> None:
+        """Add a drift point without storing a training example (no label was given)."""
+        self._update_rest(f, CAUSE_IDLE)
+
+    def _update_rest(self, f: Features, cause: str) -> None:
+        """Learn the temperature the closed room relaxes to when nothing is running.
+
+        Passive drift follows ``r_t = k * (t_rest - t_in)``, a straight line in
+        indoor temperature. Each passive example adds a point; once they span
+        enough of a range, a least-squares line gives ``k`` and ``t_rest``.
+        """
+        if f.is_open or cause not in (CAUSE_IDLE, CAUSE_HEAT_LEAK_IN, CAUSE_HEAT_LOSS):
+            return
+        self.rest_points.append([round(f.t_in, 2), round(f.r_t, 3)])
+        del self.rest_points[:-_REST_POINTS_KEPT]
+        fit = fit_rest(self.rest_points)
+        if fit is None:
+            return
+        k, t_rest = fit
+        if self.t_rest is None:
+            self.t_rest, self.k_closed = t_rest, k
+        else:
+            self.t_rest += _REST_EMA * (t_rest - self.t_rest)
+            base = self.k_closed if self.k_closed is not None else k
+            self.k_closed = base + _REST_EMA * (k - base)
 
     def _update_passive(self, f: Features, cause: str) -> None:
         """Learn how fast the building exchanges heat with outside."""
         d_out = f.delta_out
+        if self.t_rest is not None:
+            return  # k_closed now describes drift towards the building, not outside
         if d_out is None or abs(d_out) < 2.0:
             return
         observed_k = f.r_t / d_out
@@ -226,6 +310,13 @@ class Learner:
 
     def knn_probs(self, f: Features, tuning: Tuning, valid: list[str]) -> dict[str, float] | None:
         """Distance-weighted vote of the nearest taught examples."""
+        result = self.knn_vote(f, tuning, valid)
+        return None if result is None else result[0]
+
+    def knn_vote(
+        self, f: Features, tuning: Tuning, valid: list[str]
+    ) -> tuple[dict[str, float], float] | None:
+        """Vote of the nearest examples, and how far away they are (mean feature distance)."""
         pool = [s for s in self.samples if s.label in valid]
         if not pool:
             return None
@@ -240,7 +331,8 @@ class Learner:
         for dist, label in scored[:KNN_K]:
             votes[label] = votes.get(label, 0.0) + 1.0 / (dist + 0.25)
         total = sum(votes.values())
-        return {k: v / total for k, v in votes.items()}
+        nearest = scored[:KNN_K]
+        return {k: v / total for k, v in votes.items()}, sum(d for d, _ in nearest) / len(nearest)
 
     def predict(
         self,
@@ -252,8 +344,11 @@ class Learner:
         """Blend rule scores with learned examples."""
         valid = available_labels(appliances)
         rule_probs = {k: v for k, v in self.expand_rule_probs(rule, appliances).items() if k in valid}
-        knn = self.knn_probs(f, tuning, valid)
-        weight = self.learned_weight() if knn else 0.0
+        vote = self.knn_vote(f, tuning, valid)
+        knn = vote[0] if vote else None
+        # Examples that look nothing like now say little about now: a learner
+        # taught one label would otherwise claim it for every situation.
+        weight = self.learned_weight() * proximity(vote[1]) if vote else 0.0
         probs: dict[str, float] = {}
         for label in valid:
             probs[label] = (1 - weight) * rule_probs.get(label, 0.0) + weight * (

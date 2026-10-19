@@ -155,6 +155,7 @@
           "hold_band": "Setpoint band (drift beyond this = unit off)",
           "max_learned_weight": "Maximum weight of learned examples",
           "learn_from_manual": "Learn from manually set modes",
+          "ask_state": "Occasionally ask whether an appliance is on (when unsure)",
           "max_idle_minutes": "Max idle time for a fixed-speed unit before it counts as off",
           "volume_m3": "Space volume",
           "co2_outdoor": "Outdoor CO2",

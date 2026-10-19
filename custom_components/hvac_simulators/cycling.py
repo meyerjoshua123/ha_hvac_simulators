@@ -21,11 +21,14 @@ from typing import Any
 
 from .engine import Sample
 
-GRID_S = 60
+# Resample at the cadence of a typical room sensor (about every 30 s), so short
+# cycles and the moment the compressor switches keep their timing. Everything
+# below is in seconds or minutes and converted to grid steps.
+GRID_S = 30
 MIN_SPAN_S = 75 * 60  # need a few cycles before judging
-MIN_LAG_MIN, MAX_LAG_MIN = 8, 60
-_SMOOTH_MIN = 31  # detrending window
-_PHASE_DIFF_MIN = 3
+MIN_LAG_MIN, MAX_LAG_MIN = 6, 60
+_SMOOTH_S = 31 * 60  # detrending window
+_PHASE_DIFF_S = 3 * 60
 _MIN_CYCLES = 3
 MIN_AMPLITUDE_RH = 0.8
 
@@ -53,17 +56,31 @@ def _grid(samples: list[Sample], attr: str, start: float, end: float) -> list[fl
 
 
 def _detrend(x: list[float], width: int) -> list[float]:
+    """Subtract a centred moving average (running sums, so cost stays linear)."""
     half = width // 2
-    return [x[i] - statistics.fmean(x[max(0, i - half) : i + half + 1]) for i in range(len(x))]
+    prefix = [0.0]
+    for v in x:
+        prefix.append(prefix[-1] + v)
+    out = []
+    for i, v in enumerate(x):
+        lo, hi = max(0, i - half), min(len(x), i + half + 1)
+        out.append(v - (prefix[hi] - prefix[lo]) / (hi - lo))
+    return out
 
 
-def _autocorr(x: list[float], lag: int) -> float:
-    n = len(x) - lag
-    mean = statistics.fmean(x)
-    var = sum((a - mean) ** 2 for a in x)
-    if var == 0 or n <= 0:
-        return 0.0
-    return sum((x[i] - mean) * (x[i + lag] - mean) for i in range(n)) / var
+class _AutoCorr:
+    """Autocorrelation of one series; mean and variance computed once."""
+
+    def __init__(self, x: list[float]) -> None:
+        self.centred = [a - statistics.fmean(x) for a in x]
+        self.var = sum(a * a for a in self.centred)
+
+    def __call__(self, lag: int) -> float:
+        n = len(self.centred) - lag
+        if self.var == 0 or n <= 0:
+            return 0.0
+        c = self.centred
+        return sum(c[i] * c[i + lag] for i in range(n)) / self.var
 
 
 def detect_cycling(samples: list[Sample], now: float, window_s: float = 3 * 3600) -> dict[str, Any] | None:
@@ -80,20 +97,23 @@ def detect_cycling(samples: list[Sample], now: float, window_s: float = 3 * 3600
     rh = _grid(recent, "rh_in", recent[0].ts, now)
     if len(rh) < MIN_SPAN_S // GRID_S:
         return None
-    dh = _detrend(rh, _SMOOTH_MIN)
+    step_min = GRID_S / 60.0
+    dh = _detrend(rh, int(_SMOOTH_S // GRID_S))
 
-    lags = range(MIN_LAG_MIN, min(MAX_LAG_MIN, len(dh) // 3) + 1)
+    lags = range(int(MIN_LAG_MIN / step_min), min(int(MAX_LAG_MIN / step_min), len(dh) // 3) + 1)
     if not lags:
         return None
-    best_lag = max(lags, key=lambda lag: _autocorr(dh, lag))
-    peak = _autocorr(dh, best_lag)
+    _autocorr = _AutoCorr(dh)
+    best_lag = max(lags, key=_autocorr)
+    peak = _autocorr(best_lag)
     # A true oscillation is anti-correlated at half its period and repeats at
     # twice it; slow random wander does neither reliably.
-    trough = _autocorr(dh, max(1, best_lag // 2))
-    repeat = _autocorr(dh, min(2 * best_lag, len(dh) // 2))
+    trough = _autocorr(max(1, best_lag // 2))
+    repeat = _autocorr(min(2 * best_lag, len(dh) // 2))
 
     # Falling phases (compressor on): smoothed humidity heading down.
-    slope = [rh[i] - rh[i - _PHASE_DIFF_MIN] for i in range(_PHASE_DIFF_MIN, len(rh))]
+    phase = int(_PHASE_DIFF_S // GRID_S)
+    slope = [rh[i] - rh[i - phase] for i in range(phase, len(rh))]
     amplitude = statistics.pstdev(dh) * 2.83  # peak-to-peak of a sine
     threshold = max(0.15, amplitude * 0.15)
     state: str | None = None
@@ -124,7 +144,7 @@ def detect_cycling(samples: list[Sample], now: float, window_s: float = 3 * 3600
 
     return {
         "strength": round(strength, 3),
-        "period_min": best_lag,
+        "period_min": round(best_lag * step_min, 1),
         "duty": round(down_minutes / max(len(slope), 1), 3),
         "cycles": len(down_starts),
         "amplitude_rh": round(amplitude, 2),

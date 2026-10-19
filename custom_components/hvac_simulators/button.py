@@ -28,6 +28,8 @@ async def async_setup_entry(
             entities.append(ClearSetpointButton(manager, appliance))
         if manager.sims[appliance.id].effectiveness:
             entities.append(FilterCleanedButton(manager, appliance))
+        if not appliance.is_fan_group:
+            entities += [AnswerOnButton(manager, appliance), AnswerOffButton(manager, appliance)]
     async_add_entities(entities)
 
 
@@ -69,6 +71,32 @@ class ClearSetpointButton(ApplianceEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         self.manager.clear_manual_setpoint(self.appliance.id)
+
+
+class AnswerOnButton(ApplianceEntity, ButtonEntity):
+    """Answer "is it on?": it is running. Teaches the model what this looks like."""
+
+    _attr_name = "It is on"
+    _attr_icon = "mdi:power-on"
+
+    def __init__(self, manager: HvacSimulatorManager, appliance: Appliance) -> None:
+        super().__init__(manager, appliance, "answer_on")
+
+    async def async_press(self) -> None:
+        self.manager.answer(self.appliance.id, True)
+
+
+class AnswerOffButton(ApplianceEntity, ButtonEntity):
+    """Answer "is it on?": it is off. Teaches the model how the room drifts by itself."""
+
+    _attr_name = "It is off"
+    _attr_icon = "mdi:power-off"
+
+    def __init__(self, manager: HvacSimulatorManager, appliance: Appliance) -> None:
+        super().__init__(manager, appliance, "answer_off")
+
+    async def async_press(self) -> None:
+        self.manager.answer(self.appliance.id, False)
 
 
 class FilterCleanedButton(ApplianceEntity, ButtonEntity):
